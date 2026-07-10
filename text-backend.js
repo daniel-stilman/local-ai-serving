@@ -49,9 +49,6 @@ function createManagedTextBackend(options = {}) {
   let startPromise = null;
   let startModelId = '';
   let activeModelId = '';
-  let stderrTail = '';
-  let diagnosticsCarry = '';
-  let gpuOffload = null;
   let lifecycleGeneration = 0;
   let shutdownGeneration = 0;
   let loadStatus = enabled
@@ -115,9 +112,6 @@ function createManagedTextBackend(options = {}) {
 
   async function start(selected, requestedShutdownGeneration) {
     const startGeneration = ++lifecycleGeneration;
-    stderrTail = '';
-    diagnosticsCarry = '';
-    gpuOffload = null;
     if (await portInUse(port)) {
       throw backendStartError(`The configured text port ${port} is already in use.`);
     }
@@ -134,11 +128,10 @@ function createManagedTextBackend(options = {}) {
       launched = spawnProcess(executable, args, {
         cwd: path.dirname(executable),
         windowsHide: true,
-        stdio: ['ignore', 'pipe', 'pipe'],
+        stdio: ['ignore', 'ignore', 'ignore'],
         env: environment,
       });
     } catch (error) {
-      stderrTail = error && error.message || '';
       throw backendStartError('The direct text engine could not start.');
     }
     child = launched;
@@ -150,17 +143,6 @@ function createManagedTextBackend(options = {}) {
     launched.on('error', (error) => {
       spawnError = error;
     });
-    const captureDiagnostics = (chunk) => {
-      const text = chunk.toString('utf8');
-      stderrTail = (stderrTail + text).slice(-8000);
-      const diagnostics = diagnosticsCarry + text;
-      for (const match of diagnostics.matchAll(/offloaded\s+(\d+)\s*\/\s*(\d+)\s+layers?\s+to\s+GPU/gi)) {
-        gpuOffload = { offloaded: Number(match[1]), total: Number(match[2]) };
-      }
-      diagnosticsCarry = diagnostics.slice(-256);
-    };
-    launched.stdout?.on('data', captureDiagnostics);
-    launched.stderr?.on('data', captureDiagnostics);
     launched.once('exit', (code, signal) => {
       exitState = { code, signal };
       if (child === launched) {
@@ -181,7 +163,6 @@ function createManagedTextBackend(options = {}) {
           child = null;
           activeModelId = '';
         }
-        stderrTail = spawnError.message || stderrTail;
         throw backendStartError('The direct text engine could not start.');
       }
       if (
@@ -210,10 +191,7 @@ function createManagedTextBackend(options = {}) {
           ) continue;
           ready = true;
           setLoadStatus('ready', 'ready');
-          const gpuStatus = gpuOffload?.offloaded > 0
-            ? ` (GPU offload confirmed: ${gpuOffload.offloaded}/${gpuOffload.total} layers)`
-            : ' (GPU offload not confirmed)';
-          logger.log(`Direct text engine ready${gpuStatus}`);
+          logger.log('Direct text engine ready (request logging disabled).');
           return;
         }
       } catch {
@@ -281,15 +259,6 @@ function createManagedTextBackend(options = {}) {
   }
 
   function backendStartError(message) {
-    const detail = stderrTail
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .slice(-3)
-      .join(' ');
-    if (detail) {
-      logger.error?.('Direct text engine diagnostics were redacted.');
-    }
     return Object.assign(new Error(message), { statusCode: 503 });
   }
 
@@ -380,11 +349,13 @@ function makeServerArgs(modelPath, alias, port, environment = process.env) {
     '--threads-batch', String(batchThreads),
     '--batch-size', '2048',
     '--ubatch-size', '512',
-    '--cache-prompt',
+    '--no-cache-prompt',
+    '--cache-ram', '0',
+    '--no-cache-idle-slots',
     '--sleep-idle-seconds', String(normalizeInteger(environment.TEXT_SLEEP_IDLE_SECONDS, 30, 3600, 300)),
     '--offline',
     '--no-webui',
-    '--log-verbosity', String(normalizeInteger(environment.TEXT_LOG_VERBOSITY, 0, 5, 1)),
+    '--log-disable',
   ];
 }
 

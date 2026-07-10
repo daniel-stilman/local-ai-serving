@@ -94,9 +94,9 @@ test('Windows tray shortcut exposes dashboard and server controls', () => {
 });
 
 test('app consumes QR access tokens from URL fragments and sends them as headers', () => {
-  assert.match(app, /ACCESS_TOKEN_STORAGE_KEY/);
+  assert.match(app, /LEGACY_ACCESS_TOKEN_STORAGE_KEY/);
   assert.match(app, /window\.location\.hash/);
-  assert.match(app, /sessionStorage\.setItem\(ACCESS_TOKEN_STORAGE_KEY, token\)/);
+  assert.doesNotMatch(app, /sessionStorage\.(?:setItem|getItem)\(/);
   assert.match(app, /window\.history\.replaceState/);
   assert.match(app, /'X-Access-Token': accessToken/);
   assert.match(app, /async function apiFetch/);
@@ -105,7 +105,7 @@ test('app consumes QR access tokens from URL fragments and sends them as headers
 
 test('app ignores legacy query-string access tokens and scrubs them from the URL', () => {
   const source = extractFunctionSource(app, 'consumeAccessToken');
-  assert.match(source, /const token = hashParams\.get\('access'\) \|\| storedToken/);
+  assert.match(source, /const token = hashParams\.get\('access'\) \|\| ''/);
   assert.doesNotMatch(source, /searchParams\.get\('access'\)/);
   assert.match(source, /searchParams\.delete\('access'\)/);
 
@@ -120,18 +120,17 @@ test('app ignores legacy query-string access tokens and scrubs them from the URL
     },
   };
   const consumeAccessToken = vm.runInNewContext(
-    `(() => { const ACCESS_TOKEN_STORAGE_KEY = 'test-access-storage'; return (${source}); })()`,
+    `(() => { const LEGACY_ACCESS_TOKEN_STORAGE_KEY = 'test-access-storage'; return (${source}); })()`,
     {
       URLSearchParams,
       sessionStorage: {
-        getItem(key) { return storage.get(key) || null; },
-        setItem(key, value) { storage.set(key, value); },
+        removeItem(key) { storage.delete(key); },
       },
       window: windowState,
     },
   );
-  assert.equal(consumeAccessToken(), 'stored-value');
-  assert.equal(storage.get('test-access-storage'), 'stored-value');
+  assert.equal(consumeAccessToken(), '');
+  assert.equal(storage.has('test-access-storage'), false);
   assert.deepEqual(replacements, ['/chat?theme=dark#view=chat']);
 
   storage.clear();
@@ -144,13 +143,13 @@ test('app ignores legacy query-string access tokens and scrubs them from the URL
   windowState.location.search = '?theme=dark';
   replacements.length = 0;
   assert.equal(consumeAccessToken(), 'fragment-value');
-  assert.equal(storage.get('test-access-storage'), 'fragment-value');
+  assert.equal(storage.has('test-access-storage'), false);
   assert.deepEqual(replacements, ['/chat?theme=dark#view=chat']);
 
   windowState.location.hash = '#access=mobile-fragment';
   windowState.history.replaceState = () => { throw new Error('history writes blocked'); };
   assert.equal(consumeAccessToken(), 'mobile-fragment');
-  assert.equal(storage.get('test-access-storage'), 'mobile-fragment');
+  assert.equal(storage.has('test-access-storage'), false);
 });
 
 test('missing and stale phone access never masquerade as empty text or image model lists', async () => {
@@ -178,7 +177,7 @@ test('missing and stale phone access never masquerade as empty text or image mod
   }).join('\n\n');
   const context = {};
   vm.runInNewContext(`
-    const ACCESS_TOKEN_STORAGE_KEY = 'synthetic-access-storage';
+    const LEGACY_ACCESS_TOKEN_STORAGE_KEY = 'synthetic-access-storage';
     const ACCESS_REQUIRED_MESSAGE = 'Access required. Scan the current QR code from the local dashboard.';
     const ACCESS_REQUIRED_OPTION_TEXT = 'Access required - scan the current QR code';
     let accessToken = '';
@@ -242,7 +241,7 @@ test('missing and stale phone access never masquerade as empty text or image mod
       accessIsRequired = false;
       responseStatus = status;
       responseAccessRequired = accessMarker;
-      session = new Map(token ? [[ACCESS_TOKEN_STORAGE_KEY, token]] : []);
+      session = new Map();
       requests = [];
       bodyClasses = new Set();
       lastStatus = null;
@@ -271,7 +270,7 @@ test('missing and stale phone access never masquerade as empty text or image mod
         name,
         errorName,
         accessToken,
-        storedToken: session.get(ACCESS_TOKEN_STORAGE_KEY) || '',
+        storedToken: session.get(LEGACY_ACCESS_TOKEN_STORAGE_KEY) || '',
         accessHidden: els.accessRequired.hidden,
         accessClass: bodyClasses.has('access-is-required'),
         requestHeaders: requests[0].headers,
@@ -332,7 +331,7 @@ test('missing and stale phone access never masquerade as empty text or image mod
 
   assert.equal(upstreamUnauthorized.errorName, '');
   assert.equal(upstreamUnauthorized.accessToken, 'current-synthetic-token');
-  assert.equal(upstreamUnauthorized.storedToken, 'current-synthetic-token');
+  assert.equal(upstreamUnauthorized.storedToken, '');
   assert.equal(upstreamUnauthorized.accessHidden, true);
   assert.equal(upstreamUnauthorized.accessClass, false);
   assert.deepEqual(upstreamUnauthorized.textOptions, ['Synthetic text model']);
@@ -342,7 +341,7 @@ test('missing and stale phone access never masquerade as empty text or image mod
 test('browser harness contract includes phone authentication, both model systems, and recovered appearance', () => {
   assert.match(browserSmokeSource, /current fragment token/);
   assert.match(browserSmokeSource, /legacy saved backend/);
-  assert.match(browserSmokeSource, /current explicit external override/);
+  assert.match(browserSmokeSource, /legacy explicit external override is purged/);
   assert.match(browserSmokeSource, /Page\.addScriptToEvaluateOnNewDocument/);
   assert.match(browserSmokeSource, /discovered text models are not selectable/);
   assert.match(browserSmokeSource, /missing token/);
@@ -389,12 +388,15 @@ test('browser harness contract includes actual-server dashboard folder setup', (
   assert.match(browserSmokeSource, /Direct text engine ready/);
 });
 
-test('browser harness contract covers persisted model choice, mixed multi-turn actions, and phone isolation', () => {
+test('browser harness contract covers session model choice, mixed multi-turn actions, privacy reload, and phone isolation', () => {
   assert.match(browserSmokeSource, /current stale saved model replacement/);
-  assert.match(browserSmokeSource, /unavailable saved model was not replaced and persisted/);
-  assert.match(browserSmokeSource, /exercisePersistedChatSelection/);
+  assert.match(browserSmokeSource, /legacy explicit external override is purged/);
+  assert.match(browserSmokeSource, /exerciseSessionChatSelection/);
   assert.match(browserSmokeSource, /Page\.reload/);
-  assert.match(browserSmokeSource, /chat payload did not use the persisted second model/);
+  assert.match(browserSmokeSource, /chat payload did not use the selected second model/);
+  assert.match(browserSmokeSource, /inspectPersistentStorage/);
+  assert.match(browserSmokeSource, /content-rich session/);
+  assert.match(browserSmokeSource, /left browser-persistent data behind/);
   assert.match(browserSmokeSource, /text\/event-stream/);
   assert.match(browserSmokeSource, /assertTextTurnHistory/);
   assert.match(browserSmokeSource, /assertMixedMediaHistory/);
@@ -448,9 +450,13 @@ test('model settings expose host-local folder setup and actionable remote guidan
   assert.match(browserSmokeSource, /localSetupGuidanceVisible/);
 });
 
-test('optional API keys are not persisted in saved browser state', () => {
-  assert.match(app, /settings:\s*{[\s\S]*apiKey:\s*''/);
-  assert.match(app, /localStorage\.setItem\(STORAGE_KEY, JSON\.stringify\(savedState\)\)/);
+test('application content and credentials are never written to browser persistence', () => {
+  assert.doesNotMatch(app, /localStorage\.(?:setItem|getItem)\(/);
+  assert.doesNotMatch(app, /sessionStorage\.(?:setItem|getItem)\(/);
+  assert.match(app, /localStorage\.removeItem\(LEGACY_STATE_STORAGE_KEY\)/);
+  assert.match(app, /sessionStorage\.removeItem\(LEGACY_ACCESS_TOKEN_STORAGE_KEY\)/);
+  assert.match(app, /function saveState\(\)\s*{\s*\/\/ Conversation state and settings intentionally remain/);
+  assert.doesNotMatch(app, /navigator\.clipboard|execCommand\('copy'\)|exportConversation/);
 });
 
 test('default generation temperature is tuned for lively local chat', () => {
@@ -681,10 +687,10 @@ test('desktop, tablet, and phone layouts each have explicit responsive contracts
   assert.match(css, /@media\s*\(max-width:\s*480px\)/);
   assert.match(css, /\.app-shell\s*{[^}]*grid-template-columns:\s*292px minmax\(0,\s*1fr\)/s);
   assert.match(css, /@media\s*\(max-width:\s*860px\)[\s\S]*?\.app-shell\s*{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/s);
-  assert.match(css, /\.chat-layout\s*{[^}]*grid-template-areas:\s*"topbar"\s*"model-loading"\s*"messages"\s*"composer"/s);
+  assert.match(css, /\.chat-layout\s*{[^}]*grid-template-areas:\s*"topbar"\s*"messages"\s*"composer"/s);
+  assert.match(css, /\.model-loading\s*{[^}]*position:\s*absolute/s);
   for (const [selector, area] of [
     ['\\.topbar', 'topbar'],
-    ['\\.model-loading', 'model-loading'],
     ['\\.messages', 'messages'],
     ['\\.composer', 'composer'],
   ]) {
@@ -746,14 +752,17 @@ test('assistant image generation is a tool call with user-preset parameters', ()
   assert.doesNotMatch(toolDefinition, /steps|cfg|lora|seed|negative/i);
 });
 
-test('image generation is model-selectable and keeps image blobs in browser storage', () => {
+test('image generation is model-selectable and keeps blobs in memory only', () => {
   assert.match(html, /id="imageDialog"/);
   assert.match(html, /id="imageKindSelect"/);
   assert.match(html, /<option value="anima">Anima<\/option>/);
   assert.match(html, /<option value="sdxl">SDXL<\/option>/);
   assert.match(app, /apiFetch\('\/api\/image\/config'/);
   assert.match(app, /apiFetch\('\/api\/image\/generate'/);
-  assert.match(app, /indexedDB\.open\(IMAGE_DATABASE_NAME, 1\)/);
+  assert.match(app, /sessionImageBlobs\.set\(imageId, blob\)/);
+  assert.match(app, /imageMessage\.storage = 'memory'/);
+  assert.doesNotMatch(app, /objectStore\([^)]*\)\.put\(/);
+  assert.match(app, /indexedDB\.deleteDatabase\(LEGACY_IMAGE_DATABASE_NAME\)/);
   assert.match(app, /createObjectURL\(blob\)/);
   assert.match(app, /deleteImageBlob\(message\.imageId\)/);
   assert.match(css, /\.generated-image-frame/);
@@ -952,7 +961,6 @@ test('README distinguishes deterministic, structural-image, real-browser, and re
     'npm run test:smoke',
     'npm run test:smoke:all',
     'npm run test:privacy',
-    'npm run test:privacy:history',
     'npm run test:regression:all-models',
   ]) assert.match(readme, new RegExp(command.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   assert.match(readme, /structurally audits every compatible checkpoint and adapter/);
@@ -965,15 +973,15 @@ test('privacy documentation states the application boundary without absolute gua
   assert.doesNotMatch(app, /Working locally|Thinking locally|Generating on your GPU|Generating on this computer/);
   assert.doesNotMatch(html, /COMFYUI/);
   assert.match(readme, /operating-system swap, crash dumps/i);
-  assert.match(readme, /Web origin isolation normally prevents/i);
+  assert.match(readme, /memory-only/i);
   assert.match(readme, /outside the application boundary/i);
   assert.match(readme, /Default server, smoke, and structural-audit output uses anonymous aliases or ordinals/i);
   assert.doesNotMatch(readme, /RTX[ -]?[0-9]|Core i[3579]-|GeForce RTX/i);
   assert.match(serverJs, /Managed text backend is configured \(loads on demand\)/);
   assert.doesNotMatch(serverJs, /Managed text backend:.*\.alias/);
   assert.match(modelValidator, /MODEL_AUDIT_SHOW_IDENTIFIERS/);
-  assert.match(readme, /operating-system clipboard/);
-  assert.match(readme, /Export intentionally writes selected conversation data outside browser storage/);
+  assert.match(readme, /clipboard and export actions are intentionally absent/i);
+  assert.doesNotMatch(html, /exportButton/);
 });
 
 test('secondary conversation actions do not permanently consume composer space', () => {

@@ -67,8 +67,7 @@ const MODEL_REQUEST_TIMEOUT_MS = 5000;
 const PROXY_TIMEOUT_MS = 10 * 60 * 1000;
 const IMAGE_GENERATION_TIMEOUT_MS = 20 * 60 * 1000;
 const IMAGE_WORKER_IDLE_MS = normalizeInteger(process.env.IMAGE_WORKER_IDLE_MS, 0, 60 * 60 * 1000, 60_000);
-const USE_PERSISTENT_IMAGE_WORKER = process.env.IMAGE_WORKER_PERSISTENT === '1'
-  || (process.env.IMAGE_WORKER_PERSISTENT !== '0' && !process.env.IMAGE_WORKER_PATH);
+const USE_PERSISTENT_IMAGE_WORKER = process.env.IMAGE_WORKER_PERSISTENT === '1';
 const IMAGE_RESPONSE_LIMIT_BYTES = 45 * 1024 * 1024;
 const MAX_IMAGE_LORAS = 4;
 const FETCH_TIMEOUT_STATE = Symbol('fetchTimeoutState');
@@ -143,11 +142,8 @@ const requestHandler = async (req, res) => {
 };
 
 function logUnexpectedServerError(error) {
-  if (process.env.PRIVATE_DIAGNOSTICS === '1') {
-    console.error(error);
-    return;
-  }
-  console.error('Unexpected server error. Set PRIVATE_DIAGNOSTICS=1 for private local details.');
+  void error;
+  console.error('Unexpected server error. Details are suppressed for privacy.');
 }
 
 function handleFatalError(error) {
@@ -427,7 +423,7 @@ async function handleChatRequest(req, res) {
 
     res.writeHead(200, {
       'Content-Type': 'text/event-stream; charset=utf-8',
-      'Cache-Control': 'no-cache, no-transform',
+      'Cache-Control': 'no-store, no-transform',
       Connection: 'keep-alive',
       'X-Accel-Buffering': 'no',
       ...securityHeaders(),

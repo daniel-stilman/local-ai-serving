@@ -415,10 +415,9 @@ summary:focus-visible {
 .chat-layout {
   position: relative;
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  grid-template-rows: auto minmax(0, 1fr) auto;
   grid-template-areas:
     "topbar"
-    "model-loading"
     "messages"
     "composer";
   min-width: 0;
@@ -431,7 +430,10 @@ summary:focus-visible {
 }
 
 .model-loading {
-  grid-area: model-loading;
+  position: absolute;
+  top: 65px;
+  right: 3px;
+  left: 3px;
   z-index: 2;
   display: grid;
   grid-template-columns: minmax(150px, 240px) minmax(120px, 1fr);
@@ -878,6 +880,12 @@ summary:focus-visible {
   box-shadow: var(--bevel-field);
   color: inherit;
   cursor: zoom-in;
+}
+
+.empty-state .privacy-note {
+  max-width: 42rem;
+  color: var(--ink-muted);
+  font-size: 0.82rem;
 }
 
 .generated-image-pending {

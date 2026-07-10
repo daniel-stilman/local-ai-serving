@@ -1,11 +1,11 @@
 'use strict';
 
-const STORAGE_KEY = 'local-ai-serving-state-v1';
-const ACCESS_TOKEN_STORAGE_KEY = 'local-ai-serving-access-token-v1';
+const LEGACY_STATE_STORAGE_KEY = 'local-ai-serving-state-v1';
+const LEGACY_ACCESS_TOKEN_STORAGE_KEY = 'local-ai-serving-access-token-v1';
 const ACCESS_REQUIRED_MESSAGE = 'Access required. Scan the current QR code from the local dashboard.';
 const ACCESS_REQUIRED_OPTION_TEXT = 'Access required - scan the current QR code';
-const IMAGE_DATABASE_NAME = 'local-chat-private-images-v1';
-const IMAGE_STORE_NAME = 'images';
+const LEGACY_IMAGE_DATABASE_NAME = 'local-chat-private-images-v1';
+const LEGACY_IMAGE_STORE_NAME = 'images';
 const DEFAULT_SETTINGS = {
   baseUrl: '',
   baseUrlOverride: false,
@@ -71,6 +71,7 @@ let modelLoadPromise = null;
 let modelLoadSequence = 0;
 let messagesScrollIntentVersion = 0;
 let pendingMessagesViewportRestore = null;
+let lastImageGenerationViewport = null;
 let streamingMessageId = null;
 let streamingFrame = null;
 const toolUnsupportedModels = new Set();
@@ -112,7 +113,6 @@ const els = {
   refreshModelsButton: document.getElementById('refreshModelsButton'),
   messages: document.getElementById('messages'),
   regenerateButton: document.getElementById('regenerateButton'),
-  exportButton: document.getElementById('exportButton'),
   clearButton: document.getElementById('clearButton'),
   imageButton: document.getElementById('imageButton'),
   promptInput: document.getElementById('promptInput'),
@@ -162,6 +162,7 @@ const els = {
 initialize();
 
 async function initialize() {
+  await purgeLegacyBrowserPersistence();
   if (!state.conversations.length) {
     const conversation = createConversation();
     state.conversations.push(conversation);
@@ -178,6 +179,7 @@ async function initialize() {
 }
 
 function wireEvents() {
+  window.addEventListener('pagehide', clearEphemeralContent);
   els.openSidebarButton.addEventListener('click', openSidebar);
   els.closeSidebarButton.addEventListener('click', closeSidebar);
   els.sidebarOverlay.addEventListener('click', closeSidebar);
@@ -224,10 +226,6 @@ function wireEvents() {
   els.regenerateButton.addEventListener('click', () => {
     els.conversationActionsDialog.close();
     regenerateLastAssistantMessage();
-  });
-  els.exportButton.addEventListener('click', () => {
-    els.conversationActionsDialog.close();
-    exportConversation();
   });
   els.clearButton.addEventListener('click', () => {
     els.conversationActionsDialog.close();
@@ -334,7 +332,7 @@ async function loadServerConfig() {
     serverDefaultBaseUrl = typeof config.defaultBaseUrl === 'string' ? config.defaultBaseUrl.trim() : '';
     renderLocalModelSetup(config.localSetupAvailable === true);
     const migrateManagedDefault = managedTextBackendEnabled && !state.settings.baseUrlOverride;
-    if (serverDefaultBaseUrl && (!safeStorageGet(STORAGE_KEY) || migrateManagedDefault)) {
+    if (serverDefaultBaseUrl && (!state.settings.baseUrl || migrateManagedDefault)) {
       state.settings.baseUrl = serverDefaultBaseUrl;
       state.settings.baseUrlOverride = false;
       applySettingsToForm();
@@ -751,29 +749,6 @@ function clearConversation() {
   persistAndRender();
 }
 
-function exportConversation() {
-  const conversation = getActiveConversation();
-  const payload = {
-    exportedAt: new Date().toISOString(),
-    note: 'Generated image files are not included in this JSON export.',
-    settings: {
-      model: state.settings.model,
-      thinkingMode: getSelectedModelThinkingMode(),
-      baseUrl: state.settings.baseUrl,
-      temperature: state.settings.temperature,
-      max_tokens: state.settings.max_tokens,
-    },
-    conversation,
-  };
-  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement('a');
-  anchor.href = url;
-  anchor.download = `${slugify(conversation.title)}.json`;
-  anchor.click();
-  URL.revokeObjectURL(url);
-}
-
 function openSettings() {
   applySettingsToForm();
   els.settingsDialog.showModal();
@@ -870,6 +845,9 @@ function renderActiveConversation(options = {}) {
     heading.textContent = 'What would you like to make?';
     const copy = document.createElement('p');
     copy.textContent = 'Start a conversation, or ask the assistant for a picture and it will draw one with the image tool.';
+    const privacy = document.createElement('p');
+    privacy.className = 'privacy-note';
+    privacy.textContent = 'Memory-only session: reloading or closing this page clears chats, prompts, settings, and generated images from the app.';
     const actions = document.createElement('div');
     actions.className = 'empty-actions';
     const chatButton = document.createElement('button');
@@ -883,7 +861,7 @@ function renderActiveConversation(options = {}) {
     imageButton.textContent = 'Image studio';
     imageButton.addEventListener('click', openImageDialog);
     actions.append(chatButton, imageButton);
-    empty.append(mark, heading, copy, actions);
+    empty.append(mark, heading, copy, privacy, actions);
     els.messages.append(empty);
     retryPendingMessagesViewportRestore();
     return;
@@ -1031,17 +1009,6 @@ function applyGeneratedImageAspectRatio(frame, message) {
 function renderMessageTools(message, parts) {
   const tools = document.createElement('div');
   tools.className = 'message-tools';
-  const copy = document.createElement('button');
-  copy.className = 'mini-button';
-  copy.type = 'button';
-  copy.textContent = message.kind === 'image' ? 'Copy prompt' : 'Copy';
-  copy.addEventListener('click', async () => {
-    const text = message.kind === 'image' ? message.prompt || '' : message.role === 'assistant' ? parts.content : message.content;
-    await writeToClipboard(text);
-    copy.textContent = 'Copied';
-    setTimeout(() => { copy.textContent = message.kind === 'image' ? 'Copy prompt' : 'Copy'; }, 900);
-  });
-  tools.append(copy);
 
   if (message.role === 'user' && message.kind !== 'image-prompt') {
     const edit = document.createElement('button');
@@ -1051,7 +1018,7 @@ function renderMessageTools(message, parts) {
     edit.addEventListener('click', () => editUserMessage(message.id));
     tools.append(edit);
   }
-  return tools;
+  return tools.childElementCount ? tools : document.createDocumentFragment();
 }
 
 function isMessageInProgress(message) {
@@ -1729,6 +1696,7 @@ async function executeImageToolCall(conversation, call) {
   conversation.messages.push(imageMessage);
   conversation.updatedAt = Date.now();
   imageGenerationInFlight = true;
+  lastImageGenerationViewport = null;
   setBusy();
   setStatus('connected', 'Creating image');
   persistAndRender({ messages: { preserveScroll: true } });
@@ -1758,9 +1726,12 @@ async function executeImageToolCall(conversation, call) {
     if (!stoppedByUser) setStatus('error', imageMessage.error);
     return { report: { ok: false, error: imageMessage.error }, stopped: stoppedByUser };
   } finally {
+    const completionViewport = lastImageGenerationViewport || captureMessagesViewport();
     imageGenerationInFlight = false;
     setBusy();
     persistAndRender({ messages: { preserveScroll: true } });
+    queueMessagesViewportRestore(completionViewport, true);
+    lastImageGenerationViewport = null;
   }
 }
 
@@ -1786,13 +1757,7 @@ async function requestImageGeneration(request) {
 async function storeGeneratedImage(imageMessage, data, fallbackModel, fallbackLoras) {
   const imageId = makeId();
   const blob = base64ToBlob(data.imageBase64, data.mimeType);
-  let storage = 'browser';
-  try {
-    await putImageBlob(imageId, blob);
-  } catch {
-    sessionImageBlobs.set(imageId, blob);
-    storage = 'session';
-  }
+  sessionImageBlobs.set(imageId, blob);
   imageMessage.imageStatus = 'ready';
   imageMessage.imageId = imageId;
   imageMessage.imageModel = data.model || fallbackModel;
@@ -1803,7 +1768,7 @@ async function storeGeneratedImage(imageMessage, data, fallbackModel, fallbackLo
   imageMessage.cfg = data.cfg;
   imageMessage.sampler = data.sampler || imageMessage.sampler;
   imageMessage.loras = Array.isArray(data.loras) ? data.loras : fallbackLoras;
-  imageMessage.storage = storage;
+  imageMessage.storage = 'memory';
   imageMessage.updatedAt = Date.now();
 }
 
@@ -1878,6 +1843,7 @@ async function generateImage() {
   if (conversation.title === 'New chat') conversation.title = titleFromPrompt(prompt);
   conversation.updatedAt = Date.now();
   imageGenerationInFlight = true;
+  lastImageGenerationViewport = null;
   els.imageDialog.close();
   setStatus('connected', 'Creating image');
   persistAndRender({ messages: { preserveScroll: true } });
@@ -1906,9 +1872,12 @@ async function generateImage() {
     imageMessage.updatedAt = Date.now();
     setStatus('error', imageMessage.error);
   } finally {
+    const completionViewport = lastImageGenerationViewport || captureMessagesViewport();
     imageGenerationInFlight = false;
     setBusy();
     persistAndRender({ messages: { preserveScroll: true } });
+    queueMessagesViewportRestore(completionViewport, true);
+    lastImageGenerationViewport = null;
   }
 }
 
@@ -1932,15 +1901,7 @@ async function hydrateGeneratedImage(frame, message) {
 }
 
 async function getStoredImageBlob(message) {
-  let blob = sessionImageBlobs.get(message.imageId);
-  if (!blob) {
-    try {
-      blob = await getImageBlob(message.imageId);
-    } catch {
-      blob = null;
-    }
-  }
-  return blob;
+  return sessionImageBlobs.get(message.imageId) || null;
 }
 
 async function loadStoredImageElement(message, blob, className) {
@@ -2027,64 +1988,11 @@ function base64ToBlob(base64, mimeType) {
   return new Blob([bytes], { type: mimeType });
 }
 
-function openImageDatabase() {
-  return new Promise((resolve, reject) => {
-    if (!window.indexedDB) {
-      reject(new Error('IndexedDB is unavailable.'));
-      return;
-    }
-    const request = indexedDB.open(IMAGE_DATABASE_NAME, 1);
-    request.onupgradeneeded = () => {
-      if (!request.result.objectStoreNames.contains(IMAGE_STORE_NAME)) request.result.createObjectStore(IMAGE_STORE_NAME);
-    };
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error || new Error('Could not open image storage.'));
-  });
-}
-
-async function putImageBlob(imageId, blob) {
-  const database = await openImageDatabase();
-  try {
-    await runImageTransaction(database, 'readwrite', (store) => store.put(blob, imageId));
-  } finally {
-    database.close();
-  }
-}
-
-async function getImageBlob(imageId) {
-  const database = await openImageDatabase();
-  try {
-    return await runImageTransaction(database, 'readonly', (store) => store.get(imageId));
-  } finally {
-    database.close();
-  }
-}
-
-async function deleteImageBlob(imageId) {
+function deleteImageBlob(imageId) {
   sessionImageBlobs.delete(imageId);
   const objectUrl = imageObjectUrls.get(imageId);
   if (objectUrl) URL.revokeObjectURL(objectUrl);
   imageObjectUrls.delete(imageId);
-  try {
-    const database = await openImageDatabase();
-    try {
-      await runImageTransaction(database, 'readwrite', (store) => store.delete(imageId));
-    } finally {
-      database.close();
-    }
-  } catch {
-    // Persistent image storage can be unavailable in restrictive browser modes.
-  }
-}
-
-function runImageTransaction(database, mode, operation) {
-  return new Promise((resolve, reject) => {
-    const transaction = database.transaction(IMAGE_STORE_NAME, mode);
-    const request = operation(transaction.objectStore(IMAGE_STORE_NAME));
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error || new Error('Image storage failed.'));
-    transaction.onabort = () => reject(transaction.error || new Error('Image storage was interrupted.'));
-  });
 }
 
 function deleteImageBlobsForMessages(messages) {
@@ -2224,8 +2132,8 @@ function setModelLoadingHidden(hidden) {
   queueMessagesViewportRestore(viewportSnapshot);
 }
 
-function queueMessagesViewportRestore(snapshot) {
-  if (!pendingMessagesViewportRestore
+function queueMessagesViewportRestore(snapshot, replace = false) {
+  if (replace || !pendingMessagesViewportRestore
     || pendingMessagesViewportRestore.intentVersion !== messagesScrollIntentVersion
     || pendingMessagesViewportRestore.conversationId !== state.activeConversationId) {
     pendingMessagesViewportRestore = {
@@ -2266,6 +2174,11 @@ function retryPendingMessagesViewportRestore() {
 function markMessagesScrollIntent() {
   messagesScrollIntentVersion += 1;
   pendingMessagesViewportRestore = null;
+  if (imageGenerationInFlight) {
+    requestAnimationFrame(() => {
+      if (imageGenerationInFlight) lastImageGenerationViewport = captureMessagesViewport();
+    });
+  }
 }
 
 function getActiveConversation() {
@@ -2311,28 +2224,8 @@ function basenameWithoutExtension(value) {
   return String(value || '').split('/').pop().replace(/\.safetensors$/i, '');
 }
 
-function slugify(value) {
-  return value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '') || 'conversation';
-}
-
 function makeId() {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
-}
-
-async function writeToClipboard(text) {
-  if (navigator.clipboard && window.isSecureContext) {
-    await navigator.clipboard.writeText(text);
-    return;
-  }
-  const textarea = document.createElement('textarea');
-  textarea.value = text;
-  textarea.setAttribute('readonly', '');
-  textarea.style.position = 'fixed';
-  textarea.style.top = '-1000px';
-  document.body.append(textarea);
-  textarea.select();
-  document.execCommand('copy');
-  textarea.remove();
 }
 
 async function parseJsonResponse(response) {
@@ -2346,25 +2239,67 @@ async function parseJsonResponse(response) {
 }
 
 function loadState() {
-  const fallback = {
+  return {
     settings: normalizeSettings(),
     image: normalizeImageSettings(),
     conversations: [],
     activeConversationId: '',
     modelOptions: [],
   };
-  try {
-    const parsed = JSON.parse(safeStorageGet(STORAGE_KEY) || '{}');
-    return {
-      ...fallback,
-      ...parsed,
-      settings: normalizeSettings(parsed.settings || {}),
-      image: normalizeImageSettings(parsed.image || {}),
-      conversations: Array.isArray(parsed.conversations) ? parsed.conversations : [],
-      modelOptions: Array.isArray(parsed.modelOptions) ? parsed.modelOptions : [],
+}
+
+async function purgeLegacyBrowserPersistence() {
+  try { localStorage.removeItem(LEGACY_STATE_STORAGE_KEY); } catch { /* Storage may be blocked. */ }
+  try { sessionStorage.removeItem(LEGACY_ACCESS_TOKEN_STORAGE_KEY); } catch { /* Storage may be blocked. */ }
+  await Promise.allSettled([purgeLegacyImageDatabase(), purgeOriginCacheStorage()]);
+}
+
+function purgeLegacyImageDatabase() {
+  return new Promise((resolve) => {
+    if (!window.indexedDB) {
+      resolve();
+      return;
+    }
+    const request = indexedDB.open(LEGACY_IMAGE_DATABASE_NAME, 1);
+    request.onerror = () => resolve();
+    request.onsuccess = () => {
+      const database = request.result;
+      let removalStarted = false;
+      const removeDatabase = () => {
+        if (removalStarted) return;
+        removalStarted = true;
+        database.close();
+        const deletion = indexedDB.deleteDatabase(LEGACY_IMAGE_DATABASE_NAME);
+        deletion.onsuccess = resolve;
+        deletion.onerror = resolve;
+        deletion.onblocked = resolve;
+      };
+      if (!database.objectStoreNames.contains(LEGACY_IMAGE_STORE_NAME)) {
+        removeDatabase();
+        return;
+      }
+      let transaction;
+      try {
+        transaction = database.transaction(LEGACY_IMAGE_STORE_NAME, 'readwrite');
+        transaction.objectStore(LEGACY_IMAGE_STORE_NAME).clear();
+      } catch {
+        removeDatabase();
+        return;
+      }
+      transaction.oncomplete = removeDatabase;
+      transaction.onerror = removeDatabase;
+      transaction.onabort = removeDatabase;
     };
+  });
+}
+
+async function purgeOriginCacheStorage() {
+  if (!window.caches) return;
+  try {
+    const names = await caches.keys();
+    await Promise.all(names.map((name) => caches.delete(name)));
   } catch {
-    return fallback;
+    // Cache Storage may be unavailable in restrictive browsers.
   }
 }
 
@@ -2454,23 +2389,7 @@ function normalizeImageSize(value) {
 }
 
 function saveState() {
-  const savedState = {
-    ...state,
-    settings: { ...state.settings, apiKey: '' },
-  };
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(savedState));
-  } catch {
-    setStatus('error', 'Browser storage is full or unavailable');
-  }
-}
-
-function safeStorageGet(key) {
-  try {
-    return localStorage.getItem(key);
-  } catch {
-    return null;
-  }
+  // Conversation state and settings intentionally remain in this page's memory only.
 }
 
 async function apiFetch(resource, options) {
@@ -2504,11 +2423,7 @@ function isAccessRequiredError(error) {
 
 function clearAccessToken() {
   accessToken = '';
-  try {
-    sessionStorage.removeItem(ACCESS_TOKEN_STORAGE_KEY);
-  } catch {
-    // The in-memory token is still cleared when session storage is blocked.
-  }
+  try { sessionStorage.removeItem(LEGACY_ACCESS_TOKEN_STORAGE_KEY); } catch { /* Legacy cleanup only. */ }
 }
 
 function setAccessRequired(required) {
@@ -2565,16 +2480,8 @@ function replaceSelectWithPlaceholder(select, text) {
 function consumeAccessToken() {
   const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ''));
   const searchParams = new URLSearchParams(window.location.search);
-  let storedToken = '';
-  try {
-    storedToken = sessionStorage.getItem(ACCESS_TOKEN_STORAGE_KEY) || '';
-  } catch {
-    storedToken = '';
-  }
-  const token = hashParams.get('access') || storedToken;
-  if (token) {
-    try { sessionStorage.setItem(ACCESS_TOKEN_STORAGE_KEY, token); } catch { /* Session-only access may be blocked. */ }
-  }
+  const token = hashParams.get('access') || '';
+  try { sessionStorage.removeItem(LEGACY_ACCESS_TOKEN_STORAGE_KEY); } catch { /* Legacy cleanup only. */ }
   // Query strings can leak through browser history, logs, and referrers. Never
   // accept access credentials from them, but remove a legacy value if present.
   if (hashParams.has('access') || searchParams.has('access')) {
@@ -2587,8 +2494,27 @@ function consumeAccessToken() {
       window.history.replaceState(null, '', cleanUrl || '/');
     } catch {
       // Some embedded and privacy-focused mobile browsers reject history writes.
-      // The token is already held in tab-scoped storage, so boot can continue.
+      // The token remains only in this page's JavaScript memory, so boot can continue.
     }
   }
   return token;
+}
+
+function clearEphemeralContent() {
+  stopStreaming();
+  accessToken = '';
+  state.settings.apiKey = '';
+  state.settings.systemPrompt = '';
+  state.image.negativePrompt = '';
+  for (const conversation of state.conversations) conversation.messages = [];
+  state.conversations = [];
+  state.activeConversationId = '';
+  pendingStreamingMessages.clear();
+  thinkingPanelOpenByMessage.clear();
+  for (const url of imageObjectUrls.values()) URL.revokeObjectURL(url);
+  imageObjectUrls.clear();
+  sessionImageBlobs.clear();
+  for (const input of [els.promptInput, els.imagePromptInput, els.negativePromptInput, els.systemPromptInput, els.apiKeyInput]) {
+    if (input) input.value = '';
+  }
 }

@@ -824,7 +824,7 @@ test('can serve the app over generated local HTTPS', async () => {
   }
 });
 
-test('logs unexpected request failures generically unless private diagnostics are enabled', async () => {
+test('logs unexpected request failures generically even when diagnostic flags are supplied', async () => {
   const outputOffset = serverOutput.length;
   const response = await requestWithHostHeader(TEST_PORT, '[');
   assert.equal(response.statusCode, 500);
@@ -864,8 +864,8 @@ test('logs unexpected request failures generically unless private diagnostics ar
     const diagnosticsResponse = await requestWithHostHeader(DIAGNOSTICS_TEST_PORT, '[');
     assert.equal(diagnosticsResponse.statusCode, 500);
     await new Promise((resolve) => setTimeout(resolve, 30));
-    assert.equal(/TypeError|ERR_INVALID_URL/.test(diagnosticsOutput), true);
-    assert.equal(/server\.js:\d+/.test(diagnosticsOutput), true);
+    assert.equal(/Unexpected server error/.test(diagnosticsOutput), true);
+    assert.equal(/TypeError|ERR_INVALID_URL|server\.js:\d+|\\Users\\|\/home\//.test(diagnosticsOutput), false);
   } finally {
     diagnosticsProcess.kill();
   }
@@ -875,6 +875,7 @@ test('server source does not contain filesystem persistence or request-body logg
   const source = require('node:fs').readFileSync(require('node:path').join(ROOT, 'server.js'), 'utf8');
   assert.equal(/\b(writeFile|appendFile|createWriteStream|mkdir|rm|rename)\b/.test(source), false);
   assert.equal(/console\.(log|error|warn)\([^)]*(payload|messages|content|bodyText|apiKey)/.test(source), false);
+  assert.doesNotMatch(source, /PRIVATE_DIAGNOSTICS/);
 });
 
 test('server uses the same default temperature as the browser UI', () => {

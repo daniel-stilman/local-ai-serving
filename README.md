@@ -53,7 +53,7 @@ npm run serve
 
 The included command and tray shortcuts are optional Windows conveniences. Other platforms can use the npm commands directly.
 
-The managed text backend starts lazily, uses a single generation slot, and is stopped before image inference so both engines never contend for the GPU. It restarts only when text is requested. Image jobs are serialized, and the image worker remains warm briefly to reuse loaded weights.
+The managed text backend starts lazily, uses a single generation slot, and is stopped before image inference so both engines never contend for the GPU. It restarts only when text is requested. Image jobs are serialized. The image worker is one-shot by default so prompt-related process memory is released after every request; `IMAGE_WORKER_PERSISTENT=1` is an explicit performance/privacy tradeoff for trusted local use.
 
 Image Studio keeps steps, CFG, checkpoint, adapters, and sampler choices independently for each model family. CFG accepts any finite numeric value; the interface does not impose an arbitrary range. Anima exposes its native Flow Euler and Flow Heun schedulers. SDXL defaults to DPM++ SDE Karras and also offers Euler ancestral Karras, Euler Karras, and the explicitly multistep DPM++ 2M Karras option. The selector labels whether a sampler depends on cross-step history so low-step workflows can avoid multistep methods intentionally.
 
@@ -67,7 +67,7 @@ Environment variables take precedence over `config.local.json`. Machine-resource
 - `IMAGE_PYTHON`, `IMAGE_MODELS_ROOT`
 - `ANIMA_TEXT_ENCODER_PATH`, `ANIMA_VAE_PATH`
 
-Runtime and tuning overrides include `PORT`, `HOST`, `HTTPS`, `ACCESS_TOKEN`, `TLS_CERT_FILE`, `TLS_KEY_FILE`, `PRIVATE_DIAGNOSTICS`, `TEXT_CONTEXT_SIZE`, `TEXT_KV_DTYPE`, `TEXT_GPU_MARGIN_MIB`, `TEXT_THREADS`, `TEXT_BATCH_THREADS`, `IMAGE_WORKER_IDLE_MS`, and `IMAGE_WORKER_PERSISTENT`.
+Runtime and tuning overrides include `PORT`, `HOST`, `HTTPS`, `ACCESS_TOKEN`, `TLS_CERT_FILE`, `TLS_KEY_FILE`, `TEXT_CONTEXT_SIZE`, `TEXT_KV_DTYPE`, `TEXT_GPU_MARGIN_MIB`, `TEXT_THREADS`, `TEXT_BATCH_THREADS`, `IMAGE_WORKER_IDLE_MS`, and `IMAGE_WORKER_PERSISTENT`.
 
 ## Phone access
 
@@ -75,7 +75,7 @@ Runtime and tuning overrides include `PORT`, `HOST`, `HTTPS`, `ACCESS_TOKEN`, `T
 2. Open the local dashboard on the computer.
 3. Scan its access QR code from a device on the same trusted network.
 
-The QR link places the access token in the URL fragment. The browser moves it into tab-scoped session storage and removes it from the visible URL. Query-string access tokens are ignored and scrubbed. Remote API calls require the fragment-derived token.
+The QR link places the access token in the URL fragment. The browser moves it only into the current page's JavaScript memory and removes it from the visible URL. Query-string access tokens are ignored and scrubbed. Remote API calls require the fragment-derived token. Reloading or closing the page requires scanning the current QR code again.
 
 By default, the access token changes whenever the server restarts. Existing tabs and clean bookmarks can therefore lose access; scan the current dashboard QR code again. The app shows an explicit access-required screen in this state instead of presenting text and image model lists as empty. An explicit `ACCESS_TOKEN` override can pin the token when that tradeoff is appropriate.
 
@@ -85,14 +85,13 @@ The default bind supports trusted-LAN phone access. Do not port-forward this ser
 
 ## Privacy and storage
 
-- Prompts, responses, generated images, and request bodies have no application file-writing path.
+- Prompts, responses, conversations, generated images, API keys, and access tokens are memory-only. The app does not write them to files, `localStorage`, `sessionStorage`, IndexedDB, Cache Storage, or service-worker caches.
 - Prompts and pixels still pass through local processes, network buffers, RAM, and GPU memory. Operating-system swap, crash dumps, endpoint software, and device diagnostics remain outside the application boundary.
-- Conversations and settings are stored in browser local storage. Finished image blobs are stored in IndexedDB with a session-memory fallback.
-- Web origin isolation normally prevents unrelated sites and ordinary applications from reading that browser storage; browser profiles, sync, backups, device management, and privileged access remain outside the application boundary.
-- Deleting a conversation deletes its associated image blobs. Clearing site data removes browser-held conversations, settings, and images.
-- Access tokens use tab-scoped session storage. Optional external-backend API keys remain in page memory and are omitted from saved browser state.
-- Copy places selected text on the operating-system clipboard. Export intentionally writes selected conversation data outside browser storage.
-- Default server, smoke, and structural-audit output uses anonymous aliases or ordinals and redacts local paths. Unexpected errors are generic unless `PRIVATE_DIAGNOSTICS=1` is explicitly enabled for local troubleshooting; text-engine identifiers have their own documented diagnostics opt-in.
+- Reloading or closing the page clears chats, prompts, generated images, per-session settings, API keys, and the access token. Legacy browser state, image databases, and origin caches from older releases are deleted during startup.
+- Clipboard and export actions are intentionally absent so the app cannot create those extra copies. Browser or operating-system accessibility, autofill, extensions, screenshots, and manual developer-tool actions remain outside the application boundary.
+- The managed text engine is launched with request logging disabled, prompt caching disabled, RAM cache disabled, and idle-slot caching disabled. Its standard output and error streams are discarded. Unexpected server errors stay generic even if obsolete diagnostic environment flags are supplied.
+- External text backends are separate software and may retain or log requests according to their own configuration. The app cannot enforce this policy outside its managed processes.
+- Default server, smoke, and structural-audit output uses anonymous aliases or ordinals and redacts local paths.
 - Common model-weight formats, local configuration, caches, and generated output directories are ignored by Git.
 
 These boundaries describe repository behavior, not protection against a compromised browser, operating system, network, or physical device.
@@ -111,12 +110,12 @@ The checks are split into four layers:
 
 - `npm test` is deterministic and hardware-independent. It covers authorization, origin defenses, HTTPS, proxy streaming/failures, managed multi-model lifecycle, guarded folder setup, native-picker containment, GPU handoff contracts, persistent image-worker IPC/recovery, safetensors/tokenizers, local configuration, browser behavior, and responsive UI contracts.
 - `npm run test:models` structurally audits every compatible checkpoint and adapter under the configured image root without loading weights into GPU memory. Output is anonymous unless `MODEL_AUDIT_SHOW_IDENTIFIERS=1` is explicitly set.
-- `npm run test:browser` launches an installed Edge, Chrome, or Chromium build headlessly at phone and desktop viewports. It verifies current, missing, and stale QR credentials; text and image model selectors; family-compatible sampler lists; a delayed managed-model switch with indeterminate loading and confirmed readiness; saved-backend migration; and a computed-style fingerprint of the interface. Its authenticated full-app scenario drives ordered multi-turn text, an assistant image-tool round trip, a manual Image-studio render, image persistence through reload, text continuation after images, regeneration, user-message editing, rename, new/switch/delete isolation, and clear. The image workflow switches families and checkpoints, then verifies that a low step count, a CFG above the former interface ceiling, and the selected single-step-history sampler survive the switch and a full reload. It also confirms automatic negative prompts reach generation unchanged, the conversation gallery contains and scrolls through every generated image, and image generation/gallery use do not move a deliberately parked conversation viewport. It asserts the actual backend payload at every round: normal text history stays ordered, manual image cards remain local to the conversation, and assistant tool calls/results remain available to later text turns. A second isolated scenario starts the actual server, saves a synthetic GGUF folder through the real dashboard, and proves its discovered models are selectable in the app without launching inference. Use `npm run test:browser:optional` only where no supported browser is installed.
-- `npm run test:smoke` runs the real configured app on isolated loopback ports. It checks authentication, static/dashboard routes, observable model loading, cold and warm managed-text completions, real model switches, stream completion, reported GPU offload, two PNG renders per available image family, text/image handoffs, restart counts, performance ceilings, and process/port cleanup.
+- `npm run test:browser` launches an installed Edge, Chrome, or Chromium build headlessly at phone and desktop viewports. It verifies current, missing, and stale QR credentials; text and image model selectors; family-compatible sampler lists; a delayed managed-model switch with indeterminate loading and confirmed readiness; legacy-state deletion; and a computed-style fingerprint of the interface. Its authenticated full-app scenario drives ordered multi-turn text, an assistant image-tool round trip, a manual Image-studio render, text continuation after images, regeneration, user-message editing, rename, and new/switch/delete isolation. The image workflow switches families and checkpoints, then verifies that a low step count, a CFG above the former interface ceiling, and the selected single-step-history sampler survive for the active memory-only session. It also confirms automatic negative prompts reach generation unchanged, the conversation gallery contains and scrolls through every generated image, and image generation/gallery use do not move a deliberately parked conversation viewport. It audits local storage, session storage, IndexedDB, and Cache Storage while that content-rich session is open, reloads the page, and proves that the conversation and images are gone and fresh QR access is required. A second isolated scenario starts the actual server, saves a synthetic GGUF folder through the real dashboard, and proves its discovered models are selectable in the app without launching inference. Use `npm run test:browser:optional` only where no supported browser is installed.
+- `npm run test:smoke` runs the real configured app on isolated loopback ports. It checks authentication, static/dashboard routes, observable model loading, cold and warm managed-text completions, real model switches, stream completion, logging-disabled managed starts, two PNG renders per available image family, text/image handoffs, restart counts, performance ceilings, and process/port cleanup.
 - `npm run test:privacy` scans every tracked or publishable untracked file for machine paths, local model identifiers, credentials, model artifacts, private-network literals, and provider-specific directory assumptions. It derives comparison values from ignored local configuration but never prints those values.
 
 Use `npm run test:regression` for deterministic plus structural checks, `npm run test:regression:full` to include the real-browser and hardware tiers, or `npm run test:regression:all-models` for every tier plus every discovered GGUF in the configured text-model folder, including models above the normal automatic compatibility cap. `npm run test:smoke:all` runs only the hardware portion of that text breadth. Image inference still runs once per family, not once per checkpoint.
 
 Hardware-specific benchmark results and private model identifiers are intentionally not committed. Smoke output provides anonymous local timings. Performance ceilings can be overridden with the documented `SMOKE_MAX_*` environment variables when testing another workload or machine.
 
-For a freshly initialized release repository, run `npm run test:privacy:history` after the root commit. It additionally requires one parentless commit, a single clean ref/reflog object, no replacement or unreachable history, standalone in-project Git metadata, a privacy-safe noreply author address, and a clean working tree.
+Before publishing, run `npm run test:privacy`. Repository-history review is a separate release task; normal development history is supported.

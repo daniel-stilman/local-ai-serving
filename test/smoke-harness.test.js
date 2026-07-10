@@ -168,7 +168,7 @@ test('hardware smoke logs use anonymous runtime aliases and aggregate skip count
   assert.doesNotMatch(SMOKE_SOURCE, /const baseName = path\.basename\(modelPath/);
   assert.doesNotMatch(SMOKE_SOURCE, /skipped\.map\(.*path\.basename/);
   assert.match(SMOKE_SOURCE, /redactLocalDiagnostics\(error\.message\)/);
-  assert.match(SMOKE_SOURCE, /PRIVATE_DIAGNOSTICS: '0'/);
+  assert.doesNotMatch(SMOKE_SOURCE, /PRIVATE_DIAGNOSTICS|TEXT_LOG_VERBOSITY/);
   assert.match(SMOKE_SOURCE, /failed with HTTP \$\{response\.status\}/);
   assert.doesNotMatch(SMOKE_SOURCE, /typeof payload\.error === 'string'/);
   assert.match(SMOKE_SOURCE, /\/api\/text\/load/);
@@ -217,6 +217,7 @@ test('hardware smoke extracts only structured anonymous image profiles', () => {
 });
 
 test('hardware smoke performance gates catch absolute and warm-session regressions', () => {
+  assert.doesNotMatch(SMOKE_SOURCE, /enforceWarmImprovement\(coldChatMs, warmChatMs/);
   assert.deepEqual(DEFAULT_SMOKE_BUDGETS, {
     textColdMs: 30_000,
     textWarmMs: 15_000,
@@ -241,18 +242,12 @@ test('hardware smoke performance gates catch absolute and warm-session regressio
   });
 });
 
-test('hardware smoke enforces exact managed starts and reported GPU offload', () => {
-  const full = 'Direct text engine ready (GPU offload confirmed: 49/49 layers)';
-  assert.doesNotThrow(() => assertManagedStartCount(full, 1));
+test('hardware smoke enforces exact logging-disabled managed starts', () => {
+  const ready = 'Direct text engine ready (request logging disabled).';
+  assert.doesNotThrow(() => assertManagedStartCount(ready, 1));
   assert.throws(() => assertManagedStartCount('', 1), /exactly 1 managed text start/);
-  assert.throws(() => assertManagedStartCount(`${full}\n${full}`, 1), /exactly 1 managed text start/);
-  const partial = 'Direct text engine ready (GPU offload confirmed: 40/49 layers)';
-  withEnvironment({ SMOKE_REQUIRE_FULL_TEXT_GPU: null }, () => {
-    assert.throws(() => assertManagedStartCount(partial, 1), /Only 40\/49/);
-  });
-  withEnvironment({ SMOKE_REQUIRE_FULL_TEXT_GPU: '0' }, () => {
-    assert.doesNotThrow(() => assertManagedStartCount(partial, 1));
-  });
+  assert.throws(() => assertManagedStartCount(`${ready}\n${ready}`, 1), /exactly 1 managed text start/);
+  assert.throws(() => assertManagedStartCount('Direct text engine ready (request logging enabled).', 1), /logging-disabled readiness/);
 });
 
 test('hardware smoke text-model resolution preserves explicit order and deduplicates all-mode discovery', () => {

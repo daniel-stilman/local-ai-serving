@@ -47,7 +47,12 @@ test('managed llama.cpp arguments encode the measured single-GPU policy', () => 
   assert.ok(hasPair(args, '--cache-type-k', 'q8_0'));
   assert.ok(hasPair(args, '--cache-type-v', 'q8_0'));
   assert.ok(hasPair(args, '--parallel', '1'));
-  assert.ok(args.includes('--cache-prompt'));
+  assert.ok(args.includes('--no-cache-prompt'));
+  assert.ok(hasPair(args, '--cache-ram', '0'));
+  assert.ok(args.includes('--no-cache-idle-slots'));
+  assert.ok(args.includes('--log-disable'));
+  assert.equal(args.includes('--cache-prompt'), false);
+  assert.equal(args.includes('--log-verbosity'), false);
   assert.ok(args.includes('--offline'));
   assert.ok(args.includes('--no-webui'));
 });
@@ -675,24 +680,19 @@ test('concurrent readiness checks launch only one managed text process', async (
   });
 });
 
-test('managed readiness reports measured GPU layer offload', async () => {
+test('managed readiness reports a generic logging-disabled state', async () => {
   await withManagedBackend(async ({ options, children }) => {
     const logs = [];
-    options.env.TEXT_LOG_ACCELERATION = '1';
     options.logger = { log(message) { logs.push(message); } };
     options.spawn = () => {
       const child = new FakeChild();
       children.push(child);
-      queueMicrotask(() => child.stderr.write(
-        `CUDA loading ${options.env.TEXT_MODEL_PATH} as ${options.env.TEXT_MODEL_ALIAS}\n`
-        + 'load_tensors: offloaded 49/49 layers to GPU\n',
-      ));
       return child;
     };
     const backend = createManagedTextBackend(options);
     await backend.ensureReady();
     assert.equal(logs.length, 1);
-    assert.match(logs[0], /GPU offload confirmed: 49\/49 layers/);
+    assert.equal(logs[0], 'Direct text engine ready (request logging disabled).');
     assert.doesNotMatch(logs[0], /expected-model/);
     assert.equal(logs.some((message) => message.includes(options.env.TEXT_MODEL_PATH)), false);
     await backend.stop();
@@ -751,12 +751,12 @@ test('an asynchronous spawn error becomes a 503 instead of an uncaught process e
   });
 });
 
-test('managed startup diagnostics never log local identifiers even when verbose flags are requested', async () => {
+test('managed startup output is discarded even when verbose flags are requested', async () => {
   await withManagedBackend(async ({ options }) => {
     const sentinel = 'SYNTHETIC_SENSITIVE_LOCAL_DIAGNOSTIC';
     const diagnostics = [];
     options.env.TEXT_LOG_PRIVATE_DIAGNOSTICS = '1';
-    options.env.TEXT_LOG_ACCELERATION = '1';
+    options.env.TEXT_LOG_VERBOSITY = '5';
     options.logger = {
       log() {},
       error(message) {
@@ -782,11 +782,7 @@ test('managed startup diagnostics never log local identifiers even when verbose 
       backend.ensureReady(),
       (error) => error.statusCode === 503 && !error.message.includes(sentinel),
     );
-    assert.equal(diagnostics.length, 1);
-    assert.doesNotMatch(diagnostics[0], /SYNTHETIC_SENSITIVE_LOCAL_DIAGNOSTIC/);
-    assert.equal(diagnostics[0].includes(options.env.TEXT_MODEL_PATH), false);
-    assert.equal(diagnostics[0].includes(options.env.TEXT_MODEL_ALIAS), false);
-    assert.match(diagnostics[0], /redacted/);
+    assert.equal(diagnostics.length, 0);
   });
 });
 

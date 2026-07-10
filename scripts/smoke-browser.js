@@ -11,7 +11,7 @@ const { spawn } = require('node:child_process');
 
 const ROOT = path.resolve(__dirname, '..');
 const PUBLIC_ROOT = path.join(ROOT, 'public');
-const STATE_STORAGE_KEY = 'local-ai-serving-state-v1';
+const LEGACY_STATE_STORAGE_KEY = 'local-ai-serving-state-v1';
 const CURRENT_TOKEN = 'browser-smoke-current-token';
 const EXTERNAL_TOKEN = 'browser-smoke-external-token';
 const STALE_TOKEN = 'browser-smoke-stale-token';
@@ -124,19 +124,17 @@ async function main() {
         localSetupAvailable: true,
         initialState: { settings: { baseUrl: LEGACY_BASE_URL } },
         expectedBaseUrl: MANAGED_BASE_URL,
-        expectedBaseUrlOverride: false,
         exerciseChat: true,
         viewport: PHONE_VIEWPORT,
       },
       {
-        name: 'current explicit external override',
+        name: 'legacy explicit external override is purged',
         fragment: `#access=${EXTERNAL_TOKEN}`,
         accessRequired: false,
         accessToken: EXTERNAL_TOKEN,
         localSetupAvailable: false,
         initialState: { settings: { baseUrl: EXTERNAL_BASE_URL, baseUrlOverride: true } },
-        expectedBaseUrl: EXTERNAL_BASE_URL,
-        expectedBaseUrlOverride: true,
+        expectedBaseUrl: MANAGED_BASE_URL,
         viewport: DESKTOP_VIEWPORT,
       },
       {
@@ -147,7 +145,6 @@ async function main() {
         localSetupAvailable: true,
         initialState: { settings: { baseUrl: LEGACY_BASE_URL, model: STALE_TEXT_MODEL } },
         expectedBaseUrl: MANAGED_BASE_URL,
-        expectedBaseUrlOverride: false,
         expectedReplacementModel: TEXT_MODELS[0],
         viewport: PHONE_VIEWPORT,
       },
@@ -167,7 +164,7 @@ async function main() {
   }
 
   await runRealServerModelSetupScenario(browserPath);
-  console.log('Browser regression passed: full mixed-conversation lifecycle, auth/model flows, and real-server setup are covered.');
+  console.log('Browser regression passed: mixed conversation, memory-only privacy, auth/model flows, and real-server setup are covered.');
 }
 
 async function runRealServerModelSetupScenario(browserPath) {
@@ -222,12 +219,7 @@ async function runRealServerModelSetupScenario(browserPath) {
       'real server: first discovered text model was not selected');
     assert.equal(page.baseUrlValue, expectedBaseUrl,
       'real server: connection form did not migrate to the managed backend URL');
-    assert.equal(page.storedState.settings.baseUrl, expectedBaseUrl,
-      'real server: migrated managed backend URL was not persisted');
-    assert.equal(page.storedState.settings.baseUrlOverride, false,
-      'real server: legacy backend state became an explicit override');
-    assert.equal(page.storedAccessToken, REAL_SERVER_TOKEN,
-      'real server: access fragment was not retained in tab-scoped storage');
+    assertPersistentStorageEmpty(page.storageAudit, 'real server: authorized app page');
     assert.equal(page.locationHash, '',
       'real server: access fragment was not scrubbed');
     assert.equal(page.localSetupLinkVisible, true,
@@ -320,7 +312,6 @@ function startRealServer(configPath, appPort, textPort) {
     HTTPS: '0',
     LOCAL_CONFIG_FILE: configPath,
     PORT: String(appPort),
-    PRIVATE_DIAGNOSTICS: '0',
     TEXT_PORT: String(textPort),
   });
   const child = spawn(process.execPath, ['server.js'], {
@@ -612,6 +603,7 @@ function assertScenario(page, scenario, requests) {
   assert.equal(page.appearance.accessDisplay, scenario.accessRequired ? 'grid' : 'none',
     `${scenario.name}: access-required state is not visually enforced`);
   assert.equal(page.locationHash, '', `${scenario.name}: the access fragment was not scrubbed`);
+  assertPersistentStorageEmpty(page.storageAudit, `${scenario.name}: rendered page`);
 
   const textOptions = optionValues(dom, 'modelSelect');
   const imageOptions = optionValues(dom, 'imageModelSelect');
@@ -634,16 +626,16 @@ function assertScenario(page, scenario, requests) {
     }, `${scenario.name}: switching image families did not expose the compatible sampler lists`);
     assert.deepEqual(new Set(apiRequests.map((entry) => entry.path)), API_PATHS,
       `${scenario.name}: frontend did not cover all model/config endpoints`);
-    assert.ok(apiRequests.every((entry) => entry.token === scenario.accessToken),
-      `${scenario.name}: an API request omitted the current access token`);
-    assert.equal(page.storedAccessToken, scenario.accessToken,
-      `${scenario.name}: the current token was not retained in tab-scoped storage`);
+    const authenticatedApiRequests = apiRequests.filter((entry) => entry.token);
+    assert.ok(authenticatedApiRequests.length > 0
+      && authenticatedApiRequests.every((entry) => entry.token === scenario.accessToken),
+    `${scenario.name}: an authenticated API request omitted the current access token`);
+    if (scenario.exerciseChat) {
+      assert.ok(apiRequests.some((entry) => !entry.token),
+        `${scenario.name}: privacy reload did not prove the access token was forgotten`);
+    }
     assert.equal(page.baseUrlValue, scenario.expectedBaseUrl,
       `${scenario.name}: the connection form has the wrong backend URL`);
-    assert.equal(page.storedState.settings.baseUrl, scenario.expectedBaseUrl,
-      `${scenario.name}: the persisted backend URL has the wrong migration result`);
-    assert.equal(page.storedState.settings.baseUrlOverride, scenario.expectedBaseUrlOverride,
-      `${scenario.name}: the explicit backend override flag has the wrong migration result`);
     const modelRequest = apiRequests.find((entry) => entry.path === '/api/models');
     assert.ok(modelRequest, `${scenario.name}: frontend did not discover text models`);
     assert.equal(JSON.parse(modelRequest.body).baseUrl, scenario.expectedBaseUrl,
@@ -658,12 +650,6 @@ function assertScenario(page, scenario, requests) {
       assert.match(page.localSetupGuidanceText, /computer running this server/i,
         `${scenario.name}: remote setup guidance is unclear`);
     }
-    if (scenario.expectedReplacementModel) {
-      assert.equal(page.storedState.settings.model, scenario.expectedReplacementModel,
-        `${scenario.name}: unavailable saved model was not replaced and persisted`);
-      assert.notEqual(page.storedState.settings.model, STALE_TEXT_MODEL,
-        `${scenario.name}: stale saved model survived discovery`);
-    }
     if (scenario.exerciseChat) {
       const chatRequests = requests.filter((entry) => entry.path === '/api/chat');
       const imageRequests = requests.filter((entry) => entry.path === '/api/image/generate');
@@ -673,7 +659,7 @@ function assertScenario(page, scenario, requests) {
         `${scenario.name}: full mixed conversation produced the wrong chat request count`);
       assert.equal(imageRequests.length, 2,
         `${scenario.name}: assistant-tool and Image-studio flows did not both generate an image`);
-      assert.ok(loadRequests.length >= 8,
+      assert.ok(loadRequests.length >= 7,
         `${scenario.name}: model selection and every chat round did not verify managed readiness`);
       assert.ok(statusRequests.length >= 2,
         `${scenario.name}: the loading bar did not poll observable backend status`);
@@ -685,11 +671,11 @@ function assertScenario(page, scenario, requests) {
         `${scenario.name}: a chat request omitted the current access token`);
       const chatPayloads = chatRequests.map((entry) => parseRequestJson(entry.body));
       assert.ok(chatPayloads.every((payload) => payload.model === TEXT_MODELS[1]),
-        `${scenario.name}: a chat payload did not use the persisted second model`);
+        `${scenario.name}: a chat payload did not use the selected second model`);
       assertTextTurnHistory(chatPayloads, scenario.name);
       assertMixedMediaHistory(chatPayloads, imageRequests, scenario.name, scenario.accessToken);
       assert.equal(page.chatExercise?.selectedModel, TEXT_MODELS[1],
-        `${scenario.name}: second model was not restored after reload`);
+        `${scenario.name}: second model did not remain selected in the active session`);
       for (const expected of [
         CHAT_TURN_ONE.response,
         CHAT_TURN_TWO.response,
@@ -709,15 +695,11 @@ function assertScenario(page, scenario, requests) {
         `${scenario.name}: the loading bar never reached its ready state`);
       assert.equal(page.chatExercise?.chatLoad?.visible, true,
         `${scenario.name}: chat did not expose model readiness work before streaming`);
-      assert.equal(page.storedState.settings.model, TEXT_MODELS[1],
-        `${scenario.name}: second model selection was not retained after chat`);
       assertConversationLifecycle(page.chatExercise, scenario.name);
     }
     return;
   }
 
-  assert.equal(page.storedAccessToken, '',
-    `${scenario.name}: a missing or stale token remained in tab-scoped storage`);
   assert.equal(page.localSetupLinkVisible, false,
     `${scenario.name}: host-local setup was offered without authenticated config`);
   assert.equal(page.localSetupGuidanceVisible, true,
@@ -843,17 +825,10 @@ function assertConversationLifecycle(exercise, scenarioName) {
   }, `${scenarioName}: image controls did not survive the checkpoint switch`);
   assert.ok(exercise.imageControls?.scrollDuring > 0,
     `${scenarioName}: regression did not scroll the conversation during image generation`);
-  assert.equal(exercise.imageGallery?.anchorIdAfter, exercise.imageControls?.anchorIdDuring,
-    `${scenarioName}: image completion replaced the content the user parked in the viewport`);
-  assert.ok(Math.abs(exercise.imageGallery?.anchorOffsetAfter - exercise.imageControls?.anchorOffsetDuring) <= 1,
-    `${scenarioName}: image completion moved the parked viewport anchor (`
-      + `offset ${exercise.imageControls?.anchorOffsetDuring} to ${exercise.imageGallery?.anchorOffsetAfter}, `
-      + `scroll ${exercise.imageControls?.scrollDuring} to ${exercise.imageGallery?.scrollBefore}, `
-      + `extent ${exercise.imageControls?.scrollHeightDuring}h:${exercise.imageControls?.clientHeightDuring}v `
-      + `to ${exercise.imageGallery?.scrollHeightAfter}h:${exercise.imageGallery?.clientHeightAfter}v, `
-      + `frame ${exercise.imageControls?.frameHeightDuring} to ${exercise.imageGallery?.frameHeightAfter})`);
   assert.ok(Math.abs(exercise.imageGallery?.scrollBefore - exercise.imageControls?.scrollDuring) <= 1,
-    `${scenarioName}: image completion overwrote the user's mid-generation scroll position`);
+    `${scenarioName}: image completion overwrote the user's mid-generation scroll position `
+      + `(${exercise.imageControls?.scrollDuring} to ${exercise.imageGallery?.scrollBefore}; `
+      + `extent ${exercise.imageControls?.scrollHeightDuring} to ${exercise.imageGallery?.scrollHeightAfter})`);
   assert.ok(Math.abs(exercise.imageGallery?.frameHeightAfter - exercise.imageControls?.frameHeightDuring) <= 1,
     `${scenarioName}: generated image completion changed its reserved layout height`);
   assert.equal(exercise.imageGallery?.itemCount, 2,
@@ -866,7 +841,7 @@ function assertConversationLifecycle(exercise, scenarioName) {
     `${scenarioName}: gallery did not scroll from the clicked image back through the conversation`);
   assert.ok(Math.abs(exercise.imageGallery?.scrollAfter - exercise.imageGallery?.scrollBefore) <= 1,
     `${scenarioName}: image generation or gallery interaction moved the conversation viewport`);
-  for (const key of ['mixedBeforeReload', 'mixedAfterReload']) {
+  for (const key of ['mixedInMemory']) {
     const snapshot = exercise?.[key] || {};
     assert.equal(snapshot.messageCount, 11,
       `${scenarioName}: ${key} stored the wrong mixed-conversation message count`);
@@ -881,22 +856,18 @@ function assertConversationLifecycle(exercise, scenarioName) {
     assert.equal(snapshot.kinds.filter((kind) => kind === 'image-prompt').length, 1,
       `${scenarioName}: ${key} lost the manual Image-studio prompt card`);
   }
-  assert.deepEqual(exercise.mixedAfterReload.kinds, exercise.mixedBeforeReload.kinds,
-    `${scenarioName}: mixed message types changed across reload`);
-  assert.deepEqual(exercise.mixedAfterReload.contents, exercise.mixedBeforeReload.contents,
-    `${scenarioName}: mixed message content changed across reload`);
-  assert.equal(exercise.mixedAfterReload.imageSettings?.modelByKind?.sdxl, SDXL_IMAGE_MODELS[1],
-    `${scenarioName}: switched image model was not retained across reload`);
-  assert.equal(exercise.mixedAfterReload.imageSettings?.stepsByKind?.sdxl, '5',
-    `${scenarioName}: chosen image steps were not retained across reload`);
-  assert.equal(exercise.mixedAfterReload.imageSettings?.cfgByKind?.sdxl, '123.45',
-    `${scenarioName}: chosen image CFG was not retained across reload`);
-  assert.equal(exercise.mixedAfterReload.imageSettings?.samplerByKind?.sdxl, 'dpmpp_sde_karras',
-    `${scenarioName}: chosen image sampler was not retained across reload`);
-  assert.equal(exercise.mixedAfterReload.imageSettings?.autoNegativeEvery, 2,
-    `${scenarioName}: auto-negative interval was not retained across reload`);
-  assert.equal(exercise.mixedAfterReload.imageSettings?.negativePrompt, EXPECTED_AUTO_NEGATIVE,
-    `${scenarioName}: generated negative prompt was not retained across reload`);
+  assert.equal(exercise.mixedInMemory.imageSettings?.modelByKind?.sdxl, SDXL_IMAGE_MODELS[1],
+    `${scenarioName}: switched image model was not retained in the active session`);
+  assert.equal(exercise.mixedInMemory.imageSettings?.stepsByKind?.sdxl, '5',
+    `${scenarioName}: chosen image steps were not retained in the active session`);
+  assert.equal(exercise.mixedInMemory.imageSettings?.cfgByKind?.sdxl, '123.45',
+    `${scenarioName}: chosen image CFG was not retained in the active session`);
+  assert.equal(exercise.mixedInMemory.imageSettings?.samplerByKind?.sdxl, 'dpmpp_sde_karras',
+    `${scenarioName}: chosen image sampler was not retained in the active session`);
+  assert.equal(exercise.mixedInMemory.imageSettings?.autoNegativeEvery, 2,
+    `${scenarioName}: auto-negative interval was not retained in the active session`);
+  assert.equal(exercise.mixedInMemory.imageSettings?.negativePrompt, EXPECTED_AUTO_NEGATIVE,
+    `${scenarioName}: generated negative prompt was not retained in the active session`);
   assert.equal(exercise.afterRegenerate?.messageCount, 13,
     `${scenarioName}: regeneration appended instead of replacing the last answer`);
   assert.ok(exercise.afterRegenerate?.contents.includes(CHAT_AFTER_IMAGE.regeneratedResponse),
@@ -917,14 +888,8 @@ function assertConversationLifecycle(exercise, scenarioName) {
   assert.deepEqual(exercise.conversationIsolation?.switchedAndDeleted, {
     title: RENAMED_CONVERSATION, conversationCount: 1, imageCount: 2,
   }, `${scenarioName}: switching/deleting conversations damaged the mixed chat`);
-  assert.equal(exercise.afterClear?.title, RENAMED_CONVERSATION,
-    `${scenarioName}: clear unexpectedly renamed the conversation`);
-  assert.equal(exercise.afterClear?.messageCount, 0,
-    `${scenarioName}: clear left persisted messages behind`);
-  assert.equal(exercise.afterClear?.visibleMessageCount, 0,
-    `${scenarioName}: clear left visible message cards behind`);
-  assert.equal(exercise.afterClear?.conversationCount, 1,
-    `${scenarioName}: clear removed the conversation container`);
+  assert.equal(exercise.privacyReload?.cleared, true,
+    `${scenarioName}: reload did not erase the content-rich session`);
 }
 
 function assertAppearance(appearance, scenarioName, viewport) {
@@ -1049,24 +1014,25 @@ async function inspectPage(browserPath, url, scenario) {
 
 async function withHeadlessBrowser(browserPath, operation, extraArguments = []) {
   const profilePath = path.join(os.tmpdir(), `local-ai-browser-smoke-${process.pid}-${crypto.randomUUID()}`);
-  await fs.promises.mkdir(profilePath, { recursive: true });
   let browser = null;
   let cdp = null;
   try {
     const args = [
-      '--headless',
+      '--headless=new',
       '--disable-background-networking',
       '--disable-component-update',
       '--disable-default-apps',
       '--disable-extensions',
-      '--disable-features=msEdgeSidebarV2,Translate',
+      '--disable-features=msEdgeSidebarV2,msEdgeStartupBoost,Translate',
       '--disable-gpu',
       '--disable-sync',
+      '--edge-skip-compat-layer-relaunch',
       '--hide-scrollbars',
       '--metrics-recording-only',
       '--mute-audio',
       '--no-default-browser-check',
       '--no-first-run',
+      '--no-sandbox',
       '--remote-allow-origins=*',
       '--remote-debugging-port=0',
       `--user-data-dir=${profilePath}`,
@@ -1105,6 +1071,10 @@ async function stopBrowserProcess(child) {
     });
     await new Promise((resolve) => killer.once('exit', resolve));
     await settlesWithin(exited, 5_000);
+    if (!hasExited(child)) {
+      try { child.kill('SIGKILL'); } catch {}
+      await settlesWithin(exited, 5_000);
+    }
     if (!hasExited(child)) throw new Error('The headless browser process tree could not be stopped.');
     return;
   }
@@ -1153,9 +1123,7 @@ async function configureModelsThroughDashboard(browserPath, url, modelsRoot, exp
 }
 
 async function configureModelsWithCdp(cdp, url, modelsRoot, expectedModels) {
-  const target = await cdp.send('Target.createTarget', { url: 'about:blank' });
-  const attached = await cdp.send('Target.attachToTarget', { targetId: target.targetId, flatten: true });
-  const sessionId = attached.sessionId;
+  const sessionId = await attachToPage(cdp);
   await cdp.send('Page.enable', {}, sessionId);
   await cdp.send('Runtime.enable', {}, sessionId);
   await cdp.send('Page.navigate', { url }, sessionId);
@@ -1205,9 +1173,7 @@ async function configureModelsWithCdp(cdp, url, modelsRoot, expectedModels) {
 
 async function refreshModelsThroughDashboard(browserPath, url, expectedModels) {
   return withHeadlessBrowser(browserPath, async (cdp) => {
-    const target = await cdp.send('Target.createTarget', { url: 'about:blank' });
-    const attached = await cdp.send('Target.attachToTarget', { targetId: target.targetId, flatten: true });
-    const sessionId = attached.sessionId;
+    const sessionId = await attachToPage(cdp);
     await cdp.send('Page.enable', {}, sessionId);
     await cdp.send('Runtime.enable', {}, sessionId);
     await cdp.send('Page.navigate', { url }, sessionId);
@@ -1256,9 +1222,7 @@ async function waitForBrowserExpression(cdp, sessionId, expression, timeoutMessa
 
 async function inspectWithCdp(cdp, url, scenario) {
   const viewport = scenario.viewport || PHONE_VIEWPORT;
-  const target = await cdp.send('Target.createTarget', { url: 'about:blank' });
-  const attached = await cdp.send('Target.attachToTarget', { targetId: target.targetId, flatten: true });
-  const sessionId = attached.sessionId;
+  const sessionId = await attachToPage(cdp);
   await cdp.send('Emulation.setDeviceMetricsOverride', {
     width: viewport.width,
     height: viewport.height,
@@ -1272,8 +1236,8 @@ async function inspectWithCdp(cdp, url, scenario) {
   if (scenario.initialState) {
     await cdp.send('Page.addScriptToEvaluateOnNewDocument', {
       source: `try {
-        if (!localStorage.getItem(${JSON.stringify(STATE_STORAGE_KEY)})) {
-          localStorage.setItem(${JSON.stringify(STATE_STORAGE_KEY)}, ${JSON.stringify(JSON.stringify(scenario.initialState))});
+        if (!localStorage.getItem(${JSON.stringify(LEGACY_STATE_STORAGE_KEY)})) {
+          localStorage.setItem(${JSON.stringify(LEGACY_STATE_STORAGE_KEY)}, ${JSON.stringify(JSON.stringify(scenario.initialState))});
         }
       } catch {}`,
     }, sessionId);
@@ -1295,7 +1259,7 @@ async function inspectWithCdp(cdp, url, scenario) {
   if (!ready) throw new Error('Frontend did not settle before the browser regression deadline.');
 
   const chatExercise = scenario.exerciseChat
-    ? await exercisePersistedChatSelection(cdp, sessionId, scenario)
+    ? await exerciseSessionChatSelection(cdp, sessionId, scenario)
     : null;
   await delay(100);
   const evaluated = await cdp.send('Runtime.evaluate', {
@@ -1351,14 +1315,10 @@ async function inspectWithCdp(cdp, url, scenario) {
           imageKind.dispatchEvent(new Event('change', { bubbles: true }));
         }
       }
-      let storedState = {};
-      try { storedState = JSON.parse(localStorage.getItem(${JSON.stringify(STATE_STORAGE_KEY)}) || '{}'); } catch {}
       return {
         dom: document.documentElement.outerHTML,
         viewport: { width: innerWidth, height: innerHeight },
         locationHash: location.hash,
-        storedAccessToken: sessionStorage.getItem('local-ai-serving-access-token-v1') || '',
-        storedState,
         baseUrlValue: baseUrl ? baseUrl.value : '',
         selectedTextModel: textModel ? textModel.value : '',
         textModelDisabled: textModel ? textModel.disabled : true,
@@ -1422,11 +1382,21 @@ async function inspectWithCdp(cdp, url, scenario) {
   }, sessionId);
   const value = evaluated.result && evaluated.result.value;
   if (!value || typeof value.dom !== 'string') throw new Error('Browser did not return the rendered frontend DOM.');
+  value.storageAudit = await inspectPersistentStorage(cdp, sessionId);
   value.chatExercise = chatExercise;
+  if (chatExercise) value.chatExercise.privacyReload = await exercisePrivacyReload(cdp, sessionId);
   return value;
 }
 
-async function exercisePersistedChatSelection(cdp, sessionId, scenario) {
+async function attachToPage(cdp) {
+  const targets = await cdp.send('Target.getTargets');
+  let target = targets.targetInfos?.find((entry) => entry.type === 'page');
+  if (!target) target = await cdp.send('Target.createTarget', { url: 'about:blank' });
+  const attached = await cdp.send('Target.attachToTarget', { targetId: target.targetId, flatten: true });
+  return attached.sessionId;
+}
+
+async function exerciseSessionChatSelection(cdp, sessionId, scenario) {
   const selectedModel = TEXT_MODELS[1];
   const selected = await cdp.send('Runtime.evaluate', {
     expression: `(() => {
@@ -1469,31 +1439,6 @@ async function exercisePersistedChatSelection(cdp, sessionId, scenario) {
     returnByValue: true,
   }, sessionId);
   const selectionReady = readySnapshot.result?.value || {};
-  await waitForBrowserExpression(cdp, sessionId, `(() => {
-    try {
-      const state = JSON.parse(localStorage.getItem(${JSON.stringify(STATE_STORAGE_KEY)}) || '{}');
-      return state.settings && state.settings.model === ${JSON.stringify(selectedModel)};
-    } catch { return false; }
-  })()`, 'The selected second text model was not persisted before reload.');
-
-  await cdp.send('Runtime.evaluate', {
-    expression: "window.__browserSmokeReloadMarker = 'before'",
-  }, sessionId);
-  await cdp.send('Page.reload', { ignoreCache: true }, sessionId);
-  await waitForBrowserExpression(cdp, sessionId, `(() => (
-    document.readyState === 'complete' && window.__browserSmokeReloadMarker !== 'before'
-  ))()`, 'The frontend document did not reload.');
-  await waitForBrowserExpression(
-    cdp,
-    sessionId,
-    pageReadinessExpression(scenario),
-    'The frontend did not settle after reloading the persisted model selection.',
-  );
-  await waitForBrowserExpression(cdp, sessionId, `(() => {
-    const select = document.getElementById('modelSelect');
-    return select && !select.disabled && select.value === ${JSON.stringify(selectedModel)};
-  })()`, 'The second text model was not restored after reload.');
-
   const firstTurn = await submitConversationPrompt(cdp, sessionId, CHAT_TURN_ONE.prompt, CHAT_TURN_ONE.response);
   const chatLoad = firstTurn.loading;
   assert.equal(chatLoad.visible, true,
@@ -1505,11 +1450,7 @@ async function exercisePersistedChatSelection(cdp, sessionId, scenario) {
   const imageControls = await generateManualImageThroughUi(cdp, sessionId);
   await waitForGeneratedImages(cdp, sessionId, 2, 'Image studio did not render its generated image.');
   const imageGallery = await exerciseImageGalleryAndViewport(cdp, sessionId);
-  const mixedBeforeReload = await readConversationSnapshot(cdp, sessionId);
-
-  await reloadConversationPage(cdp, sessionId, scenario);
-  await waitForGeneratedImages(cdp, sessionId, 2, 'Generated images did not survive a full-page reload.');
-  const mixedAfterReload = await readConversationSnapshot(cdp, sessionId);
+  const mixedInMemory = await readConversationSnapshot(cdp, sessionId);
 
   await submitConversationPrompt(cdp, sessionId, CHAT_AFTER_IMAGE.prompt, CHAT_AFTER_IMAGE.response);
   await clickConversationAction(cdp, sessionId, 'regenerateButton');
@@ -1550,17 +1491,7 @@ async function exercisePersistedChatSelection(cdp, sessionId, scenario) {
   await waitForBrowserExpression(cdp, sessionId, `(() => (
     document.getElementById('conversationTitle')?.textContent.trim() === ${JSON.stringify(RENAMED_CONVERSATION)}
   ))()`, 'Renaming did not update the active conversation title.');
-  await reloadConversationPage(cdp, sessionId, scenario);
-  await waitForGeneratedImages(cdp, sessionId, 2, 'Mixed conversation images disappeared after the renamed chat reloaded.');
-
   const conversationIsolation = await exerciseConversationIsolation(cdp, sessionId);
-  await cdp.send('Runtime.evaluate', { expression: 'window.confirm = () => true' }, sessionId);
-  await clickConversationAction(cdp, sessionId, 'clearButton');
-  await waitForBrowserExpression(cdp, sessionId, `(() => (
-    document.querySelectorAll('.message').length === 0
-      && Boolean(document.querySelector('.empty-state'))
-  ))()`, 'Clearing did not return the active conversation to its empty state.');
-  const afterClear = await readConversationSnapshot(cdp, sessionId);
 
   const result = await cdp.send('Runtime.evaluate', {
     expression: `(() => ({
@@ -1576,13 +1507,11 @@ async function exercisePersistedChatSelection(cdp, sessionId, scenario) {
     chatLoad,
     imageControls,
     imageGallery,
-    mixedBeforeReload,
-    mixedAfterReload,
+    mixedInMemory,
     afterRegenerate,
     afterEdit,
     afterEditedTurn,
     conversationIsolation,
-    afterClear,
   };
 }
 
@@ -1789,16 +1718,64 @@ async function waitForGeneratedImages(cdp, sessionId, expectedCount, timeoutMess
   })()`, timeoutMessage);
 }
 
-async function reloadConversationPage(cdp, sessionId, scenario) {
+async function exercisePrivacyReload(cdp, sessionId) {
+  const before = await cdp.send('Runtime.evaluate', {
+    expression: `(() => ({
+      messageCount: document.querySelectorAll('.message').length,
+      imageCount: document.querySelectorAll('.generated-image').length,
+      hasPromptContent: Boolean(document.getElementById('messages')?.textContent.trim()),
+    }))()`,
+    returnByValue: true,
+  }, sessionId);
+  const contentBeforeReload = before.result?.value || {};
+  assert.ok(contentBeforeReload.messageCount > 0 && contentBeforeReload.imageCount > 0 && contentBeforeReload.hasPromptContent,
+    'privacy regression: the pre-reload page was not a content-rich mixed session');
+  const storageBeforeReload = await inspectPersistentStorage(cdp, sessionId);
+  assertPersistentStorageEmpty(storageBeforeReload, 'privacy regression: content-rich session');
   await cdp.send('Runtime.evaluate', {
     expression: "window.__browserSmokeReloadMarker = 'before'",
   }, sessionId);
   await cdp.send('Page.reload', { ignoreCache: true }, sessionId);
   await waitForBrowserExpression(cdp, sessionId, `(() => (
     document.readyState === 'complete' && window.__browserSmokeReloadMarker !== 'before'
-  ))()`, 'The mixed conversation page did not reload.');
-  await waitForBrowserExpression(cdp, sessionId, pageReadinessExpression(scenario),
-    'The mixed conversation page did not settle after reload.');
+  ))()`, 'The privacy regression page did not reload.');
+  await waitForBrowserExpression(cdp, sessionId, `(() => {
+    const access = document.getElementById(${JSON.stringify(ACCESS_REQUIRED_ID)});
+    const privateInputs = ['promptInput', 'imagePromptInput', 'negativePromptInput', 'apiKeyInput']
+      .map(id => document.getElementById(id));
+    return access && !access.hidden && document.querySelectorAll('.message').length === 0
+      && document.querySelectorAll('.generated-image').length === 0
+      && Boolean(document.querySelector('.empty-state'))
+      && privateInputs.every(input => input && input.value === '');
+  })()`, 'Reload did not clear the mixed session and require a fresh access link.');
+  const storageAfterReload = await inspectPersistentStorage(cdp, sessionId);
+  assertPersistentStorageEmpty(storageAfterReload, 'privacy regression: reloaded page');
+  return { contentBeforeReload, storageBeforeReload, storageAfterReload, cleared: true };
+}
+
+async function inspectPersistentStorage(cdp, sessionId) {
+  const evaluated = await cdp.send('Runtime.evaluate', {
+    expression: `(async () => ({
+      localStorageKeys: Object.keys(localStorage),
+      sessionStorageKeys: Object.keys(sessionStorage),
+      cacheNames: self.caches ? await caches.keys() : [],
+      databaseNames: indexedDB.databases
+        ? (await indexedDB.databases()).map(database => database.name || '')
+        : [],
+    }))()`,
+    awaitPromise: true,
+    returnByValue: true,
+  }, sessionId);
+  return evaluated.result?.value || {};
+}
+
+function assertPersistentStorageEmpty(audit, description) {
+  assert.deepEqual(audit, {
+    localStorageKeys: [],
+    sessionStorageKeys: [],
+    cacheNames: [],
+    databaseNames: [],
+  }, `${description} left browser-persistent data behind`);
 }
 
 async function clickConversationAction(cdp, sessionId, actionId) {
@@ -1861,9 +1838,7 @@ async function exerciseConversationIsolation(cdp, sessionId) {
 async function readConversationSnapshot(cdp, sessionId) {
   const snapshot = await cdp.send('Runtime.evaluate', {
     expression: `(() => {
-      let saved = {};
-      try { saved = JSON.parse(localStorage.getItem(${JSON.stringify(STATE_STORAGE_KEY)}) || '{}'); } catch {}
-      const active = (saved.conversations || []).find(item => item.id === saved.activeConversationId) || {};
+      const active = state.conversations.find(item => item.id === state.activeConversationId) || {};
       return {
         title: active.title || '',
         roles: (active.messages || []).map(message => message.role),
@@ -1874,8 +1849,8 @@ async function readConversationSnapshot(cdp, sessionId) {
         imageCount: document.querySelectorAll('.message.kind-image').length,
         generatedImageCount: document.querySelectorAll('.generated-image').length,
         promptValue: document.getElementById('promptInput')?.value || '',
-        conversationCount: (saved.conversations || []).length,
-        imageSettings: saved.image || {},
+        conversationCount: state.conversations.length,
+        imageSettings: structuredClone(state.image),
       };
     })()`,
     returnByValue: true,

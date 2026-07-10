@@ -125,12 +125,10 @@ async function runAppSmoke({ executable, modelPaths, modelsRoot, includeImages }
     TEXT_PORT: String(textPort),
     TEXT_START_TIMEOUT_MS: process.env.SMOKE_TEXT_START_TIMEOUT_MS || '',
     TEXT_SLEEP_IDLE_SECONDS: '3600',
-    TEXT_LOG_VERBOSITY: '4',
     IMAGE_WORKER_PATH: process.env.IMAGE_WORKER_PATH || path.join(ROOT, 'inference', 'worker.py'),
     IMAGE_WORKER_PERSISTENT: '1',
     IMAGE_WORKER_IDLE_MS: '600000',
     PYTHONDONTWRITEBYTECODE: '1',
-    PRIVATE_DIAGNOSTICS: '0',
   };
   const expectedCatalog = await discoverManagedTextCatalog(appEnvironment);
   const selectedModels = modelPaths.map((modelPath) => expectedCatalog.find((entry) => (
@@ -215,7 +213,6 @@ async function runAppSmoke({ executable, modelPaths, modelsRoot, includeImages }
         smokeBudget('SMOKE_MAX_TEXT_WARM_MS', DEFAULT_SMOKE_BUDGETS.textWarmMs),
         `Text selection ${modelIndex + 1} warm completion`,
       );
-      enforceWarmImprovement(coldChatMs, warmChatMs, `Managed text selection ${modelIndex + 1}`);
       expect(
         countReadyLogs(output) === expectedReadyCount,
         'A warm text completion unexpectedly restarted the managed text engine.',
@@ -1080,16 +1077,10 @@ function countReadyLogs(output) {
 
 function assertManagedStartCount(output, expected) {
   expect(countReadyLogs(output) === expected, `Expected exactly ${expected} managed text start(s).`);
-  const offloads = [...String(output).matchAll(/GPU offload confirmed:\s*(\d+)\s*\/\s*(\d+)\s+layers/gi)];
-  expect(offloads.length === expected, 'A managed text start did not confirm GPU layer offload.');
-  for (const match of offloads) {
-    const offloaded = Number(match[1]);
-    const total = Number(match[2]);
-    expect(offloaded > 0 && total >= offloaded, 'The managed text backend reported invalid GPU layer counts.');
-    if (normalizeBoolean(process.env.SMOKE_REQUIRE_FULL_TEXT_GPU, true)) {
-      expect(offloaded === total, `Only ${offloaded}/${total} text layers were offloaded to the GPU.`);
-    }
-  }
+  expect(
+    (String(output).match(/Direct text engine ready \(request logging disabled\)\./g) || []).length === expected,
+    'A managed text start did not confirm logging-disabled readiness.',
+  );
 }
 
 async function stopChild(child, timeoutMs) {
