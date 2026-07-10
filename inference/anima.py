@@ -690,6 +690,7 @@ def _sample_anima(
     height: int,
     steps: int,
     cfg: float,
+    sampler: str,
     seed: int,
     device: torch.device,
     dtype: torch.dtype,
@@ -704,15 +705,29 @@ def _sample_anima(
     )
     base_schedule = torch.linspace(1.0, 0.0, steps + 1, device=device, dtype=torch.float32)
     sigmas = 3.0 * base_schedule / (1.0 + 2.0 * base_schedule)
-    for index in range(steps):
-        sigma = sigmas[index]
-        batch_latent = latent.to(dtype).expand(2, -1, -1, -1, -1)
+
+    def predict_velocity(current: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:
+        batch_latent = current.to(dtype).expand(2, -1, -1, -1, -1)
         timestep = sigma.expand(2).to(dtype)
         prediction = denoiser(batch_latent, timestep, context, rope, context_kv)
         unconditional, conditional = prediction.float().chunk(2)
         velocity = unconditional + float(cfg) * (conditional - unconditional)
-        latent = latent + velocity * (sigmas[index + 1] - sigma)
-        del batch_latent, prediction, unconditional, conditional, velocity
+        del batch_latent, timestep, prediction, unconditional, conditional
+        return velocity
+
+    for index in range(steps):
+        sigma = sigmas[index]
+        next_sigma = sigmas[index + 1]
+        interval = next_sigma - sigma
+        velocity = predict_velocity(latent, sigma)
+        if sampler == "flow_heun":
+            predicted = latent + velocity * interval
+            corrected_velocity = predict_velocity(predicted, next_sigma)
+            latent = latent + 0.5 * (velocity + corrected_velocity) * interval
+            del predicted, corrected_velocity
+        else:
+            latent = latent + velocity * interval
+        del velocity
     del rope, context_kv, base_schedule, sigmas
     return latent
 
@@ -773,6 +788,7 @@ class AnimaSession:
         height: int,
         steps: int,
         cfg: float,
+        sampler: str,
         seed: int,
     ) -> bytes:
         profiler = StageProfiler("anima-warm")
@@ -805,6 +821,7 @@ class AnimaSession:
             height,
             steps,
             cfg,
+            sampler,
             seed,
             self.device,
             self.dtype,
@@ -837,6 +854,7 @@ def generate_anima(
     height: int,
     steps: int,
     cfg: float,
+    sampler: str,
     seed: int,
     loras: list[tuple[Path, float]],
 ) -> bytes:
@@ -884,7 +902,7 @@ def generate_anima(
     )
     del positive_source, negative_source
     profiler.mark("conditioning")
-    latent = _sample_anima(denoiser, context, width, height, steps, cfg, seed, device, dtype)
+    latent = _sample_anima(denoiser, context, width, height, steps, cfg, sampler, seed, device, dtype)
     profiler.mark("sampling")
 
     del denoiser, context

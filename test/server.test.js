@@ -158,6 +158,7 @@ test('generates through the direct worker and returns only in-memory image bytes
   assert.equal(body.seed, 42);
   assert.equal(body.model, 'anima-test.safetensors');
   assert.equal(body.mimeType, 'image/png');
+  assert.equal(body.sampler, 'flow_euler');
   assert.deepEqual(body.loras, [{ id: 'anima-style.safetensors', strength: 0.75 }]);
   await new Promise((resolve) => setTimeout(resolve, 30));
   const diagnostics = serverOutput.slice(outputOffset);
@@ -193,11 +194,31 @@ test('accepts the full-checkpoint Anima tensor prefix used by community models',
       prompt: 'community layout test',
       size: 'square',
       seed: 44,
+      cfg: 123.45,
+      sampler: 'flow_heun',
     }),
   });
   assert.equal(response.status, 200);
   const body = await response.json();
   assert.equal(body.model, 'community-model.safetensors');
+  assert.equal(body.cfg, 123.45);
+  assert.equal(body.sampler, 'flow_heun');
+});
+
+test('rejects samplers from the wrong image-model family', async () => {
+  const response = await fetch(`${BASE_URL}/api/image/generate`, {
+    method: 'POST',
+    headers: accessHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({
+      kind: 'anima',
+      model: 'anima-test.safetensors',
+      prompt: 'wrong sampler family test',
+      size: 'square',
+      sampler: 'dpmpp_sde_karras',
+    }),
+  });
+  assert.equal(response.status, 400);
+  assert.match((await response.json()).error, /sampler is not available/i);
 });
 
 test('fails closed when the direct worker reports an inference error', async () => {

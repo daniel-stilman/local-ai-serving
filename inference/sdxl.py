@@ -599,6 +599,13 @@ def _size_condition(pooled: torch.Tensor, width: int, height: int) -> torch.Tens
     return torch.cat((pooled, embedded.expand(pooled.shape[0], -1)), dim=-1)
 
 
+def _ancestral_step(sigma_from: torch.Tensor, sigma_to: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    variance = sigma_to.square() * (sigma_from.square() - sigma_to.square()) / sigma_from.square()
+    sigma_up = torch.minimum(sigma_to, variance.clamp_min(0).sqrt())
+    sigma_down = (sigma_to.square() - sigma_up.square()).clamp_min(0).sqrt()
+    return sigma_down, sigma_up
+
+
 def _sample_sdxl(
     denoiser: SDXLUNet,
     context: torch.Tensor,
@@ -607,35 +614,98 @@ def _sample_sdxl(
     height: int,
     steps: int,
     cfg: float,
+    sampler: str,
     seed: int,
     device: torch.device,
     dtype: torch.dtype,
 ) -> torch.Tensor:
     training_sigmas = _training_sigmas(device)
     sigmas = _karras_sigmas(steps, float(training_sigmas[0]), float(training_sigmas[-1]), device)
-    timesteps = _sigma_to_timestep(sigmas[:-1], training_sigmas)
+    generator = make_generator(seed, device)
     latent = torch.randn(
         (1, 4, height // 8, width // 8),
-        generator=make_generator(seed, device),
+        generator=generator,
         device=device,
         dtype=dtype,
     ).to(memory_format=torch.channels_last) * torch.sqrt(1.0 + sigmas[0].square()).to(dtype)
+
+    def random_noise() -> torch.Tensor:
+        return torch.randn(latent.shape, generator=generator, device=device, dtype=dtype)
+
+    def predict_denoised(current: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:
+        model_input = current / torch.sqrt(1.0 + sigma.square()).to(dtype)
+        timestep = _sigma_to_timestep(sigma, training_sigmas).expand(2)
+        prediction = denoiser(model_input.expand(2, -1, -1, -1), timestep, context, labels)
+        unconditional, conditional = prediction.chunk(2)
+        epsilon = unconditional + float(cfg) * (conditional - unconditional)
+        denoised = current - epsilon * sigma.to(dtype)
+        del model_input, timestep, prediction, unconditional, conditional, epsilon
+        return denoised
 
     previous_denoised = None
     previous_time = None
     for index in range(steps):
         sigma = sigmas[index]
         next_sigma = sigmas[index + 1]
-        model_input = latent / torch.sqrt(1.0 + sigma.square()).to(dtype)
-        timestep = timesteps[index].expand(2)
-        prediction = denoiser(model_input.expand(2, -1, -1, -1), timestep, context, labels)
-        unconditional, conditional = prediction.chunk(2)
-        epsilon = unconditional + float(cfg) * (conditional - unconditional)
-        denoised = latent - epsilon * sigma.to(dtype)
+        denoised = predict_denoised(latent, sigma)
 
-        if index == steps - 1:
+        if next_sigma == 0:
             latent = denoised
-        else:
+        elif sampler == "euler_karras":
+            derivative = (latent - denoised) / sigma.to(dtype)
+            latent = latent + derivative * (next_sigma - sigma).to(dtype)
+            del derivative
+        elif sampler == "euler_ancestral_karras":
+            sigma_down, sigma_up = _ancestral_step(sigma, next_sigma)
+            derivative = (latent - denoised) / sigma.to(dtype)
+            latent = latent + derivative * (sigma_down - sigma).to(dtype)
+            latent = latent + random_noise() * sigma_up.to(dtype)
+            del sigma_down, sigma_up, derivative
+        elif sampler == "dpmpp_sde_karras":
+            current_time = -sigma.log()
+            next_time = -next_sigma.log()
+            interval = next_time - current_time
+            midpoint_time = current_time + 0.5 * interval
+            midpoint_sigma = (-midpoint_time).exp()
+
+            midpoint_down, midpoint_up = _ancestral_step(sigma, midpoint_sigma)
+            midpoint_latent = (midpoint_down / sigma).to(dtype) * latent
+            midpoint_latent = midpoint_latent - torch.expm1(-0.5 * interval).to(dtype) * denoised
+
+            first_noise = random_noise()
+            remaining_noise = random_noise()
+            first_span = (sigma - midpoint_sigma).abs()
+            remaining_span = (midpoint_sigma - next_sigma).abs()
+            full_noise = (
+                first_noise * first_span.sqrt().to(dtype)
+                + remaining_noise * remaining_span.sqrt().to(dtype)
+            ) / (first_span + remaining_span).sqrt().to(dtype)
+            midpoint_latent = midpoint_latent + first_noise * midpoint_up.to(dtype)
+            midpoint_denoised = predict_denoised(midpoint_latent, midpoint_sigma)
+
+            next_down, next_up = _ancestral_step(sigma, next_sigma)
+            latent = (next_down / sigma).to(dtype) * latent
+            latent = latent - torch.expm1(-interval).to(dtype) * midpoint_denoised
+            latent = latent + full_noise * next_up.to(dtype)
+            del (
+                current_time,
+                next_time,
+                interval,
+                midpoint_time,
+                midpoint_sigma,
+                midpoint_down,
+                midpoint_up,
+                midpoint_latent,
+                first_noise,
+                remaining_noise,
+                first_span,
+                remaining_span,
+                full_noise,
+                midpoint_denoised,
+                next_down,
+                next_up,
+            )
+        elif sampler == "dpmpp_2m_karras":
             current_time = -sigma.log()
             next_time = -next_sigma.log()
             interval = next_time - current_time
@@ -647,9 +717,10 @@ def _sample_sdxl(
                 corrected = (1.0 + 1.0 / (2.0 * ratio)) * denoised - previous_denoised / (2.0 * ratio)
             latent = (next_sigma / sigma).to(dtype) * latent - torch.expm1(-interval).to(dtype) * corrected
             previous_time = current_time
-        previous_denoised = denoised
-        del model_input, timestep, prediction, unconditional, conditional, epsilon
-    del previous_denoised, training_sigmas, sigmas, timesteps
+            previous_denoised = denoised
+        else:
+            raise InferenceError("The selected SDXL sampler is not available.")
+    del previous_denoised, previous_time, training_sigmas, sigmas, generator
     return latent
 
 
@@ -707,6 +778,7 @@ class SDXLSession:
         height: int,
         steps: int,
         cfg: float,
+        sampler: str,
         seed: int,
     ) -> bytes:
         profiler = StageProfiler("sdxl-warm")
@@ -742,6 +814,7 @@ class SDXLSession:
                 height,
                 steps,
                 cfg,
+                sampler,
                 seed,
                 self.device,
                 self.dtype,
@@ -779,6 +852,7 @@ def generate_sdxl(
     height: int,
     steps: int,
     cfg: float,
+    sampler: str,
     seed: int,
     loras: list[tuple[Path, float]],
 ) -> bytes:
@@ -826,7 +900,7 @@ def generate_sdxl(
     denoiser.prepare_context(context)
     profiler.mark("conditioning")
 
-    latent = _sample_sdxl(denoiser, context, labels, width, height, steps, cfg, seed, device, dtype)
+    latent = _sample_sdxl(denoiser, context, labels, width, height, steps, cfg, sampler, seed, device, dtype)
     profiler.mark("sampling")
 
     del denoiser, context, labels

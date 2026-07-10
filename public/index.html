@@ -203,6 +203,12 @@
           </select>
         </label>
 
+        <label class="field">
+          <span>Sampler / scheduler</span>
+          <select id="imageSamplerSelect"></select>
+        </label>
+        <p class="field-note" id="imageSamplerHint"></p>
+
         <div class="settings-grid image-parameter-grid">
           <label class="field">
             <span>Steps</span>
@@ -210,7 +216,7 @@
           </label>
           <label class="field">
             <span>CFG</span>
-            <input id="imageCfgInput" type="number" min="0" max="20" step="0.1">
+            <input id="imageCfgInput" type="number" step="any">
           </label>
         </div>
 

@@ -51,7 +51,7 @@ const SYNTHETIC_TOOL_CALL_ID = 'synthetic-image-tool-call';
 const SYNTHETIC_IMAGE_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
 const SYNTHETIC_PHONE_HOST = 'synthetic-phone.invalid';
 const ANIMA_IMAGE_MODELS = ['synthetic-image-anima', 'synthetic-image-anima-variant'];
-const SDXL_IMAGE_MODELS = ['synthetic-image-sdxl'];
+const SDXL_IMAGE_MODELS = ['synthetic-image-sdxl', 'synthetic-image-sdxl-variant'];
 const IMAGE_MODELS = [...ANIMA_IMAGE_MODELS, ...SDXL_IMAGE_MODELS];
 const API_PATHS = new Set(['/api/config', '/api/models', '/api/image/config']);
 const FIXTURE_API_PATHS = new Set([...API_PATHS, '/api/chat', '/api/image/generate']);
@@ -490,6 +490,7 @@ async function serveApi(apiPath, response, token, body, textLoadStates, chatProm
       height: 1,
       steps: payload.steps,
       cfg: payload.cfg,
+      sampler: payload.sampler,
       loras: Array.isArray(payload.loras) ? payload.loras : [],
     });
     return;
@@ -502,7 +503,10 @@ async function serveApi(apiPath, response, token, body, textLoadStates, chatProm
         syntheticImageModel(ANIMA_IMAGE_MODELS[0], 'Synthetic Anima'),
         syntheticImageModel(ANIMA_IMAGE_MODELS[1], 'Synthetic Anima Variant'),
       ],
-      sdxl: [syntheticImageModel(SDXL_IMAGE_MODELS[0], 'Synthetic SDXL')],
+      sdxl: [
+        syntheticImageModel(SDXL_IMAGE_MODELS[0], 'Synthetic SDXL'),
+        syntheticImageModel(SDXL_IMAGE_MODELS[1], 'Synthetic SDXL Variant'),
+      ],
     },
     loras: { anima: [], sdxl: [] },
     runtime: {},
@@ -618,6 +622,10 @@ function assertScenario(page, scenario, requests) {
       anima: ANIMA_IMAGE_MODELS,
       sdxl: SDXL_IMAGE_MODELS,
     }, `${scenario.name}: switching image families did not expose both model lists`);
+    assert.deepEqual(page.samplerOptionsByKind, {
+      anima: ['flow_euler', 'flow_heun'],
+      sdxl: ['dpmpp_sde_karras', 'euler_ancestral_karras', 'euler_karras', 'dpmpp_2m_karras'],
+    }, `${scenario.name}: switching image families did not expose the compatible sampler lists`);
     assert.deepEqual(new Set(apiRequests.map((entry) => entry.path)), API_PATHS,
       `${scenario.name}: frontend did not cover all model/config endpoints`);
     assert.ok(apiRequests.every((entry) => entry.token === scenario.accessToken),
@@ -791,12 +799,18 @@ function assertMixedMediaHistory(payloads, imageRequests, scenarioName, accessTo
     CHAT_IMAGE_TOOL.imagePrompt,
     MANUAL_IMAGE_PROMPT,
   ], `${scenarioName}: image-tool and Image-studio prompts reached the backend in the wrong order`);
-  assert.equal(imagePayloads[1].model, ANIMA_IMAGE_MODELS[1],
+  assert.equal(imagePayloads[0].sampler, 'flow_euler',
+    `${scenarioName}: assistant image tool did not use the persisted Anima sampler`);
+  assert.equal(imagePayloads[1].kind, 'sdxl',
+    `${scenarioName}: manual image generation did not switch model families`);
+  assert.equal(imagePayloads[1].model, SDXL_IMAGE_MODELS[1],
     `${scenarioName}: manual image generation did not use the switched image model`);
-  assert.equal(imagePayloads[1].steps, 17,
+  assert.equal(imagePayloads[1].steps, 5,
     `${scenarioName}: image model switching reset the chosen step count`);
-  assert.equal(imagePayloads[1].cfg, 3.25,
+  assert.equal(imagePayloads[1].cfg, 123.45,
     `${scenarioName}: image model switching reset the chosen CFG`);
+  assert.equal(imagePayloads[1].sampler, 'dpmpp_sde_karras',
+    `${scenarioName}: the preferred single-step-history SDXL sampler did not reach generation`);
   assert.equal(imagePayloads[1].negativePrompt, EXPECTED_AUTO_NEGATIVE,
     `${scenarioName}: automatic negative prompt did not reach image generation unchanged`);
   assert.ok(imageRequests.every((entry) => entry.token === accessToken),
@@ -806,9 +820,11 @@ function assertMixedMediaHistory(payloads, imageRequests, scenarioName, accessTo
 function assertConversationLifecycle(exercise, scenarioName) {
   assert.deepEqual(exercise.imageControls, {
     generated: true,
-    model: ANIMA_IMAGE_MODELS[1],
-    steps: '17',
-    cfg: '3.25',
+    kind: 'sdxl',
+    model: SDXL_IMAGE_MODELS[1],
+    steps: '5',
+    cfg: '123.45',
+    sampler: 'dpmpp_sde_karras',
     negativePrompt: EXPECTED_AUTO_NEGATIVE,
     scrollBefore: 0,
   }, `${scenarioName}: image controls did not survive the checkpoint switch`);
@@ -841,12 +857,14 @@ function assertConversationLifecycle(exercise, scenarioName) {
     `${scenarioName}: mixed message types changed across reload`);
   assert.deepEqual(exercise.mixedAfterReload.contents, exercise.mixedBeforeReload.contents,
     `${scenarioName}: mixed message content changed across reload`);
-  assert.equal(exercise.mixedAfterReload.imageSettings?.modelByKind?.anima, ANIMA_IMAGE_MODELS[1],
+  assert.equal(exercise.mixedAfterReload.imageSettings?.modelByKind?.sdxl, SDXL_IMAGE_MODELS[1],
     `${scenarioName}: switched image model was not retained across reload`);
-  assert.equal(exercise.mixedAfterReload.imageSettings?.stepsByKind?.anima, '17',
+  assert.equal(exercise.mixedAfterReload.imageSettings?.stepsByKind?.sdxl, '5',
     `${scenarioName}: chosen image steps were not retained across reload`);
-  assert.equal(exercise.mixedAfterReload.imageSettings?.cfgByKind?.anima, '3.25',
+  assert.equal(exercise.mixedAfterReload.imageSettings?.cfgByKind?.sdxl, '123.45',
     `${scenarioName}: chosen image CFG was not retained across reload`);
+  assert.equal(exercise.mixedAfterReload.imageSettings?.samplerByKind?.sdxl, 'dpmpp_sde_karras',
+    `${scenarioName}: chosen image sampler was not retained across reload`);
   assert.equal(exercise.mixedAfterReload.imageSettings?.autoNegativeEvery, 2,
     `${scenarioName}: auto-negative interval was not retained across reload`);
   assert.equal(exercise.mixedAfterReload.imageSettings?.negativePrompt, EXPECTED_AUTO_NEGATIVE,
@@ -1289,14 +1307,17 @@ async function inspectWithCdp(cdp, url, scenario) {
       const promptRect = prompt ? prompt.getBoundingClientRect() : null;
       const sendRect = send ? send.getBoundingClientRect() : null;
       const imageOptionsByKind = {};
+      const samplerOptionsByKind = {};
       if (!${scenario.accessRequired ? 'true' : 'false'} && ${scenario.requireImageModels === false ? 'false' : 'true'}) {
         const imageKind = document.getElementById('imageKindSelect');
         const imageModels = document.getElementById('imageModelSelect');
-        if (imageKind && imageModels) {
+        const imageSamplers = document.getElementById('imageSamplerSelect');
+        if (imageKind && imageModels && imageSamplers) {
           for (const kind of ['anima', 'sdxl']) {
             imageKind.value = kind;
             imageKind.dispatchEvent(new Event('change', { bubbles: true }));
             imageOptionsByKind[kind] = Array.from(imageModels.options, option => option.value);
+            samplerOptionsByKind[kind] = Array.from(imageSamplers.options, option => option.value);
           }
           imageKind.value = 'anima';
           imageKind.dispatchEvent(new Event('change', { bubbles: true }));
@@ -1318,6 +1339,7 @@ async function inspectWithCdp(cdp, url, scenario) {
         localSetupGuidanceVisible: Boolean(localSetupGuidance && !localSetupGuidance.hidden),
         localSetupGuidanceText: localSetupGuidance ? localSetupGuidance.textContent.trim() : '',
         imageOptionsByKind,
+        samplerOptionsByKind,
         appearance: {
           stylesheets: document.styleSheets.length,
           bodyBackgroundColor: bodyStyle.backgroundColor,
@@ -1591,17 +1613,21 @@ async function generateManualImageThroughUi(cdp, sessionId) {
     expression: `(() => {
       const prompt = document.getElementById('imagePromptInput');
       const generate = document.getElementById('generateImageButton');
+      const kind = document.getElementById('imageKindSelect');
       const model = document.getElementById('imageModelSelect');
       const steps = document.getElementById('imageStepsInput');
       const cfg = document.getElementById('imageCfgInput');
+      const sampler = document.getElementById('imageSamplerSelect');
       const every = document.getElementById('autoNegativeEverySelect');
       const auto = document.getElementById('autoNegativeButton');
-      if (!prompt || !generate || generate.disabled || !model || !steps || !cfg || !every || !auto) return { generated: false };
-      steps.value = '17';
+      if (!prompt || !generate || generate.disabled || !kind || !model || !steps || !cfg || !sampler || !every || !auto) return { generated: false };
+      kind.value = 'sdxl';
+      kind.dispatchEvent(new Event('change', { bubbles: true }));
+      steps.value = '5';
       steps.dispatchEvent(new Event('input', { bubbles: true }));
-      cfg.value = '3.25';
+      cfg.value = '123.45';
       cfg.dispatchEvent(new Event('input', { bubbles: true }));
-      model.value = ${JSON.stringify(ANIMA_IMAGE_MODELS[1])};
+      model.value = ${JSON.stringify(SDXL_IMAGE_MODELS[1])};
       model.dispatchEvent(new Event('change', { bubbles: true }));
       prompt.value = ${JSON.stringify(MANUAL_IMAGE_PROMPT)};
       prompt.dispatchEvent(new Event('input', { bubbles: true }));
@@ -1614,9 +1640,11 @@ async function generateManualImageThroughUi(cdp, sessionId) {
       const negativePrompt = document.getElementById('negativePromptInput').value;
       const snapshot = {
         generated: true,
+        kind: kind.value,
         model: model.value,
         steps: steps.value,
         cfg: cfg.value,
+        sampler: sampler.value,
         negativePrompt,
         scrollBefore: document.getElementById('messages').scrollTop,
       };
@@ -1786,7 +1814,7 @@ async function readConversationSnapshot(cdp, sessionId) {
 function pageReadinessExpression(scenario) {
   const expectAccessRequired = Boolean(scenario.accessRequired);
   const textModels = JSON.stringify(scenario.expectedTextModels || TEXT_MODELS);
-  const imageModel = JSON.stringify(IMAGE_MODELS[0]);
+  const imageModels = JSON.stringify(IMAGE_MODELS);
   const requireImageModels = scenario.requireImageModels !== false;
   return `(() => {
     if (document.readyState !== 'complete') return false;
@@ -1799,7 +1827,7 @@ function pageReadinessExpression(scenario) {
     const imageValues = Array.from(image.options, option => option.value);
     return access.hidden
       && ${textModels}.every(value => textValues.includes(value))
-      && (${requireImageModels ? 'imageValues.includes(' + imageModel + ')' : 'true'});
+      && (${requireImageModels ? imageModels + '.some(value => imageValues.includes(value))' : 'true'});
   })()`;
 }
 

@@ -21,12 +21,25 @@ const DEFAULT_IMAGE_SETTINGS = {
   modelByKind: { anima: '', sdxl: '' },
   stepsByKind: { anima: '', sdxl: '' },
   cfgByKind: { anima: '', sdxl: '' },
+  samplerByKind: { anima: 'flow_euler', sdxl: 'dpmpp_sde_karras' },
   lorasByKind: { anima: [], sdxl: [] },
   size: 'portrait',
   negativePrompt: '',
   autoNegativeEvery: 4,
   toolEnabled: true,
 };
+const IMAGE_SAMPLERS = Object.freeze({
+  anima: Object.freeze([
+    Object.freeze({ id: 'flow_euler', label: 'Flow Euler - single-step history', hint: 'Native, fast, and well suited to very low step counts.' }),
+    Object.freeze({ id: 'flow_heun', label: 'Flow Heun - single-step history', hint: 'Two evaluations per step for a corrected flow update.' }),
+  ]),
+  sdxl: Object.freeze([
+    Object.freeze({ id: 'dpmpp_sde_karras', label: 'DPM++ SDE Karras - single-step history', hint: 'Stochastic two-stage DPM++ SDE; the default low-step SDXL choice.' }),
+    Object.freeze({ id: 'euler_ancestral_karras', label: 'Euler ancestral Karras - single-step history', hint: 'Fast stochastic Euler updates without multistep memory.' }),
+    Object.freeze({ id: 'euler_karras', label: 'Euler Karras - single-step history', hint: 'Fast deterministic Euler updates without multistep memory.' }),
+    Object.freeze({ id: 'dpmpp_2m_karras', label: 'DPM++ 2M Karras - multistep', hint: 'Uses the previous denoised estimate; retained for comparison.' }),
+  ]),
+});
 const AUTO_NEGATIVE_TERMS = 'bad, worst, awful, terrible, horrible, inferior, undesirable, ineffective, unconvincing, unexceptional, mediocre, disappointing, displeasing, uninspiring, forgettable, lackluster, subpar, inadequate, unenjoyable, shallow, stale, second-rate, disappointing, unimpressive, mundane, inept, low-quality, unenjoyable, pointless, boring, tedious, drab, dull, vapid, trivial, insignificant, negligible, paltry, unremarkable, unfulfilling, unsatisfying, unsolid, uninsightful, unrefreshing, ungratifying, unmasterful, uncompelling, unfavorable, poor, dreadful, abysmal, dismal, pathetic, pitiful, rubbish, shoddy, unsatisfactory, atrocious, miserable, lousy'
   .split(',')
   .map((term) => term.trim());
@@ -117,6 +130,8 @@ const els = {
   autoNegativeEverySelect: document.getElementById('autoNegativeEverySelect'),
   autoNegativeButton: document.getElementById('autoNegativeButton'),
   imageSizeSelect: document.getElementById('imageSizeSelect'),
+  imageSamplerSelect: document.getElementById('imageSamplerSelect'),
+  imageSamplerHint: document.getElementById('imageSamplerHint'),
   imageStepsInput: document.getElementById('imageStepsInput'),
   imageCfgInput: document.getElementById('imageCfgInput'),
   imageSeedInput: document.getElementById('imageSeedInput'),
@@ -237,6 +252,7 @@ function wireEvents() {
   els.imageKindSelect.addEventListener('change', () => {
     state.image.kind = normalizeImageKind(els.imageKindSelect.value);
     applyImageKindSettings();
+    renderImageSamplerOptions();
     renderImageModelOptions();
     saveState();
   });
@@ -253,6 +269,11 @@ function wireEvents() {
   els.imageCfgInput.addEventListener('input', saveImageParametersFromForm);
   els.negativePromptInput.addEventListener('input', () => {
     state.image.negativePrompt = els.negativePromptInput.value.slice(0, 3000);
+    saveState();
+  });
+  els.imageSamplerSelect.addEventListener('change', () => {
+    state.image.samplerByKind[state.image.kind] = normalizeImageSampler(state.image.kind, els.imageSamplerSelect.value);
+    updateImageSamplerHint();
     saveState();
   });
   els.autoNegativeEverySelect.addEventListener('change', () => {
@@ -930,9 +951,11 @@ function getMessageDetail(message) {
   if (message.imageStatus === 'generating') return 'Creating...';
   if (message.imageStatus === 'error') return 'Generation failed';
   const model = message.imageModel ? basenameWithoutExtension(message.imageModel) : '';
+  const sampler = getImageSamplerLabel(message.imageKind, message.sampler);
   const loraCount = Array.isArray(message.loras) ? message.loras.length : 0;
   return [
     model,
+    sampler,
     message.steps ? `${message.steps} steps` : '',
     message.cfg !== undefined ? `CFG ${message.cfg}` : '',
     loraCount ? `${loraCount} LoRA${loraCount === 1 ? '' : 's'}` : '',
@@ -1207,6 +1230,11 @@ function applyModelThinkingModeToForm() {
   els.thinkingModeSelect.disabled = isBusy() || accessIsRequired || !state.settings.model;
 }
 
+function getImageSamplerLabel(kind, samplerId) {
+  const normalizedKind = normalizeImageKind(kind);
+  return IMAGE_SAMPLERS[normalizedKind].find((sampler) => sampler.id === samplerId)?.label || '';
+}
+
 function normalizeModelThinkingModes(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
   const modes = {};
@@ -1281,6 +1309,7 @@ function applyImageSettingsToForm() {
   els.imageSeedInput.value = '';
   els.imageToolToggle.checked = state.image.toolEnabled !== false;
   applyImageKindSettings();
+  renderImageSamplerOptions();
   renderImageModelOptions();
 }
 
@@ -1296,6 +1325,37 @@ function saveImageParametersFromForm() {
   state.image.stepsByKind[kind] = els.imageStepsInput.value;
   state.image.cfgByKind[kind] = els.imageCfgInput.value;
   saveState();
+}
+
+function renderImageSamplerOptions() {
+  const kind = normalizeImageKind(state.image.kind);
+  const samplers = IMAGE_SAMPLERS[kind];
+  const selected = normalizeImageSampler(kind, state.image.samplerByKind[kind]);
+  els.imageSamplerSelect.replaceChildren();
+  for (const sampler of samplers) {
+    const option = document.createElement('option');
+    option.value = sampler.id;
+    option.textContent = sampler.label;
+    els.imageSamplerSelect.append(option);
+  }
+  els.imageSamplerSelect.value = selected;
+  state.image.samplerByKind[kind] = selected;
+  updateImageSamplerHint();
+}
+
+function updateImageSamplerHint() {
+  const kind = normalizeImageKind(state.image.kind);
+  const sampler = IMAGE_SAMPLERS[kind].find((entry) => entry.id === els.imageSamplerSelect.value);
+  els.imageSamplerHint.textContent = sampler?.hint || '';
+}
+
+function normalizeImageSampler(kind, value) {
+  const normalizedKind = normalizeImageKind(kind);
+  const samplers = IMAGE_SAMPLERS[normalizedKind];
+  const candidate = String(value || '');
+  return samplers.some((sampler) => sampler.id === candidate)
+    ? candidate
+    : DEFAULT_IMAGE_SETTINGS.samplerByKind[normalizedKind];
 }
 
 function generateAutoNegativePrompt() {
@@ -1545,7 +1605,8 @@ function getImageGenerationSettings() {
     kind,
     model: selected.id,
     steps: Number.isInteger(savedSteps) && savedSteps >= 1 && savedSteps <= 80 ? savedSteps : selected.recommendedSteps,
-    cfg: Number.isFinite(savedCfg) && savedCfg >= 0 && savedCfg <= 20 ? savedCfg : selected.recommendedCfg,
+    cfg: Number.isFinite(savedCfg) ? savedCfg : selected.recommendedCfg,
+    sampler: normalizeImageSampler(kind, state.image.samplerByKind[kind]),
     loras: (state.image.lorasByKind[kind] || []).filter((lora) => availableLoraIds.has(lora.id)).slice(0, 4),
     negativePrompt: state.image.negativePrompt,
     size: state.image.size,
@@ -1621,6 +1682,7 @@ async function executeImageToolCall(conversation, call) {
     imageKind: settings.kind,
     steps: settings.steps,
     cfg: settings.cfg,
+    sampler: settings.sampler,
     loras: settings.loras,
     prompt,
     requestedBy: 'assistant',
@@ -1641,6 +1703,7 @@ async function executeImageToolCall(conversation, call) {
       size,
       steps: settings.steps,
       cfg: settings.cfg,
+      sampler: settings.sampler,
       seed: '',
       loras: settings.loras,
     });
@@ -1699,6 +1762,7 @@ async function storeGeneratedImage(imageMessage, data, fallbackModel, fallbackLo
   imageMessage.height = data.height;
   imageMessage.steps = data.steps;
   imageMessage.cfg = data.cfg;
+  imageMessage.sampler = data.sampler || imageMessage.sampler;
   imageMessage.loras = Array.isArray(data.loras) ? data.loras : fallbackLoras;
   imageMessage.storage = storage;
   imageMessage.updatedAt = Date.now();
@@ -1711,6 +1775,7 @@ async function generateImage() {
   const model = els.imageModelSelect.value;
   const steps = Number.parseInt(els.imageStepsInput.value, 10);
   const cfg = Number(els.imageCfgInput.value);
+  const sampler = normalizeImageSampler(kind, els.imageSamplerSelect.value);
   const loras = [...els.imageLoraList.querySelectorAll('.lora-row')].map((row) => ({
     id: row.querySelector('select').value,
     strength: Number(row.querySelector('input').value),
@@ -1729,8 +1794,8 @@ async function generateImage() {
     els.imageStepsInput.focus();
     return;
   }
-  if (!Number.isFinite(cfg) || cfg < 0 || cfg > 20) {
-    els.imageFormError.textContent = 'CFG must be between 0 and 20.';
+  if (els.imageCfgInput.value.trim() === '' || !Number.isFinite(cfg)) {
+    els.imageFormError.textContent = 'CFG must be a finite number.';
     els.imageCfgInput.focus();
     return;
   }
@@ -1749,6 +1814,7 @@ async function generateImage() {
   state.image.negativePrompt = els.negativePromptInput.value.trim();
   state.image.stepsByKind[kind] = String(steps);
   state.image.cfgByKind[kind] = String(cfg);
+  state.image.samplerByKind[kind] = sampler;
   state.image.lorasByKind[kind] = loras;
   saveState();
 
@@ -1762,6 +1828,7 @@ async function generateImage() {
     imageKind: kind,
     steps,
     cfg,
+    sampler,
     loras,
     prompt,
   });
@@ -1782,6 +1849,7 @@ async function generateImage() {
       size: state.image.size,
       steps,
       cfg,
+      sampler,
       seed: els.imageSeedInput.value,
       loras,
     });
@@ -2220,6 +2288,7 @@ function normalizeImageSettings(settings = {}) {
   const modelByKind = settings.modelByKind && typeof settings.modelByKind === 'object' ? settings.modelByKind : {};
   const stepsByKind = settings.stepsByKind && typeof settings.stepsByKind === 'object' ? settings.stepsByKind : {};
   const cfgByKind = settings.cfgByKind && typeof settings.cfgByKind === 'object' ? settings.cfgByKind : {};
+  const samplerByKind = settings.samplerByKind && typeof settings.samplerByKind === 'object' ? settings.samplerByKind : {};
   const lorasByKind = settings.lorasByKind && typeof settings.lorasByKind === 'object' ? settings.lorasByKind : {};
   return {
     ...DEFAULT_IMAGE_SETTINGS,
@@ -2238,14 +2307,24 @@ function normalizeImageSettings(settings = {}) {
       sdxl: normalizeSavedNumber(stepsByKind.sdxl, 1, 80),
     },
     cfgByKind: {
-      anima: normalizeSavedNumber(cfgByKind.anima, 0, 20),
-      sdxl: normalizeSavedNumber(cfgByKind.sdxl, 0, 20),
+      anima: normalizeSavedFiniteNumber(cfgByKind.anima),
+      sdxl: normalizeSavedFiniteNumber(cfgByKind.sdxl),
+    },
+    samplerByKind: {
+      anima: normalizeImageSampler('anima', samplerByKind.anima),
+      sdxl: normalizeImageSampler('sdxl', samplerByKind.sdxl),
     },
     lorasByKind: {
       anima: normalizeSavedLoras(lorasByKind.anima),
       sdxl: normalizeSavedLoras(lorasByKind.sdxl),
     },
   };
+}
+
+function normalizeSavedFiniteNumber(value) {
+  if (value === '' || value === undefined || value === null) return '';
+  const number = Number(value);
+  return Number.isFinite(number) ? String(number) : '';
 }
 
 function normalizeSavedNumber(value, minimum, maximum) {

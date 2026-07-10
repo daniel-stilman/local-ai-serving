@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import math
 import os
 import sys
 from pathlib import Path
@@ -80,6 +81,29 @@ def _number(value: object, minimum: float, maximum: float, label: str) -> float:
     return parsed
 
 
+def _finite_number(value: object, label: str) -> float:
+    if isinstance(value, bool):
+        raise InferenceError(f"{label} is invalid.")
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as error:
+        raise InferenceError(f"{label} is invalid.") from error
+    if not math.isfinite(parsed):
+        raise InferenceError(f"{label} must be a finite number.")
+    return parsed
+
+
+def _sampler(value: object, kind: str) -> str:
+    allowed = {
+        "anima": {"flow_euler", "flow_heun"},
+        "sdxl": {"dpmpp_sde_karras", "euler_ancestral_karras", "euler_karras", "dpmpp_2m_karras"},
+    }
+    sampler = str(value or ("flow_euler" if kind == "anima" else "dpmpp_sde_karras"))
+    if sampler not in allowed[kind]:
+        raise InferenceError("The selected image sampler is not available.")
+    return sampler
+
+
 def _loras(value: object) -> list[tuple[Path, float]]:
     if value is None:
         return []
@@ -117,7 +141,8 @@ def generate(payload: dict, use_session: bool = False) -> dict:
     if kind == "sdxl" and (width % 32 or height % 32):
         raise InferenceError("SDXL image dimensions must be divisible by 32.")
     steps = _integer(payload.get("steps"), 1, 80, "Steps")
-    cfg = _number(payload.get("cfg"), 0.0, 20.0, "CFG")
+    cfg = _finite_number(payload.get("cfg"), "CFG")
+    sampler = _sampler(payload.get("sampler"), kind)
     seed = _integer(payload.get("seed"), 0, 2**63 - 1, "Seed")
     model_path = _path(payload.get("modelPath"), "The selected model")
     loras = _loras(payload.get("loras"))
@@ -129,7 +154,7 @@ def generate(payload: dict, use_session: bool = False) -> dict:
         vae_path = _path(payload.get("vaePath"), "The Anima VAE")
         if use_session:
             session = _get_image_session(kind, model_path, loras, text_encoder_path, vae_path)
-            png = session.generate(prompt, negative_prompt, width, height, steps, cfg, seed)
+            png = session.generate(prompt, negative_prompt, width, height, steps, cfg, sampler, seed)
         else:
             png = generate_anima(
                 model_path=model_path,
@@ -141,12 +166,13 @@ def generate(payload: dict, use_session: bool = False) -> dict:
                 height=height,
                 steps=steps,
                 cfg=cfg,
+                sampler=sampler,
                 seed=seed,
                 loras=loras,
             )
     elif use_session:
         session = _get_image_session(kind, model_path, loras)
-        png = session.generate(prompt, negative_prompt, width, height, steps, cfg, seed)
+        png = session.generate(prompt, negative_prompt, width, height, steps, cfg, sampler, seed)
     else:
         png = generate_sdxl(
             model_path=model_path,
@@ -156,6 +182,7 @@ def generate(payload: dict, use_session: bool = False) -> dict:
             height=height,
             steps=steps,
             cfg=cfg,
+            sampler=sampler,
             seed=seed,
             loras=loras,
         )

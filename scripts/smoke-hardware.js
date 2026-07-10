@@ -33,6 +33,8 @@ const DEFAULT_SMOKE_BUDGETS = Object.freeze({
   textRestartMs: 30_000,
   imageColdMs: 45_000,
   imageWarmMs: 20_000,
+  sdxlDpmppSdeColdMs: 72_000,
+  sdxlDpmppSdeWarmMs: 32_000,
 });
 let activeSmokeChild = null;
 
@@ -568,6 +570,10 @@ async function runImageFamilySmoke({ appBaseUrl, token, textPort, kind, model })
     );
     expect(result.kind === kind && result.model === model.id, `${kind} returned the wrong model metadata.`);
     expect(result.seed === seed && result.steps === steps, `${kind} returned the wrong generation settings.`);
+    expect(
+      result.sampler === (kind === 'sdxl' ? 'dpmpp_sde_karras' : 'flow_euler'),
+      `${kind} returned the wrong default sampler.`,
+    );
     expect(result.mimeType === 'image/png', `${kind} did not return a PNG.`);
     const png = inspectPngBase64(result.imageBase64);
     expect(
@@ -1204,9 +1210,14 @@ function smokeBudget(name, fallback) {
 
 function resolveImageBudget(kind, phase, environment = process.env) {
   const normalizedPhase = String(phase).toUpperCase();
-  const fallback = normalizedPhase === 'COLD'
-    ? DEFAULT_SMOKE_BUDGETS.imageColdMs
-    : DEFAULT_SMOKE_BUDGETS.imageWarmMs;
+  const isDefaultSdxlSde = String(kind).toLowerCase() === 'sdxl';
+  const fallback = isDefaultSdxlSde
+    ? (normalizedPhase === 'COLD'
+      ? DEFAULT_SMOKE_BUDGETS.sdxlDpmppSdeColdMs
+      : DEFAULT_SMOKE_BUDGETS.sdxlDpmppSdeWarmMs)
+    : (normalizedPhase === 'COLD'
+      ? DEFAULT_SMOKE_BUDGETS.imageColdMs
+      : DEFAULT_SMOKE_BUDGETS.imageWarmMs);
   const familyBudget = environment[`SMOKE_MAX_${String(kind).toUpperCase()}_${normalizedPhase}_MS`];
   const genericBudget = environment[`SMOKE_MAX_IMAGE_${normalizedPhase}_MS`];
   return normalizeInteger(familyBudget || genericBudget, 1_000, 60 * 60_000, fallback);

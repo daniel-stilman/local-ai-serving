@@ -223,9 +223,12 @@ test('hardware smoke performance gates catch absolute and warm-session regressio
     textRestartMs: 30_000,
     imageColdMs: 45_000,
     imageWarmMs: 20_000,
+    sdxlDpmppSdeColdMs: 72_000,
+    sdxlDpmppSdeWarmMs: 32_000,
   });
   assert.equal(resolveImageBudget('anima', 'COLD', {}), 45_000);
-  assert.equal(resolveImageBudget('sdxl', 'WARM', {}), 20_000);
+  assert.equal(resolveImageBudget('sdxl', 'COLD', {}), 72_000);
+  assert.equal(resolveImageBudget('sdxl', 'WARM', {}), 32_000);
   assert.equal(resolveImageBudget('anima', 'WARM', {
     SMOKE_MAX_IMAGE_WARM_MS: '17000',
     SMOKE_MAX_ANIMA_WARM_MS: '13000',

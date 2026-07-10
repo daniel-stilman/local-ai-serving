@@ -48,6 +48,7 @@ sdxl_bad_size = generation_error(width=272, height=272)
 anima_size_path_error = generation_error(kind='anima', width=272, height=272)
 null_prompt = generation_error(prompt=None)
 boolean_steps = generation_error(steps=True)
+unbounded_cfg_values = [worker._finite_number(value, 'CFG') for value in (12345.678, -50.0)]
 
 class CloseTracker:
     def __init__(self):
@@ -103,7 +104,7 @@ try:
         [],
     )
     try:
-        session.generate('private prompt', '', 256, 256, 1, 1.0, 1)
+        session.generate('private prompt', '', 256, 256, 1, 1.0, 'dpmpp_sde_karras', 1)
     except RuntimeError:
         pass
 finally:
@@ -111,6 +112,40 @@ finally:
 
 schedule = torch.tensor([1.0, 4.0])
 continuous_timesteps = sdxl._sigma_to_timestep(torch.tensor([1.0, 2.0, 4.0]), schedule).tolist()
+
+class FakeSDXLSamplerDenoiser:
+    def __init__(self):
+        self.calls = 0
+    def __call__(self, latent, _timestep, _context, _labels):
+        self.calls += 1
+        return torch.zeros_like(latent)
+
+sdxl_sampler_results = {}
+for sampler_name in ('dpmpp_sde_karras', 'euler_ancestral_karras', 'euler_karras', 'dpmpp_2m_karras'):
+    outputs = []
+    call_counts = []
+    for _repeat in range(2):
+        fake_sdxl_sampler = FakeSDXLSamplerDenoiser()
+        output = sdxl._sample_sdxl(
+            fake_sdxl_sampler,
+            torch.zeros((2, 1, 1), dtype=torch.float32),
+            torch.zeros((2, 1), dtype=torch.float32),
+            32,
+            32,
+            3,
+            123.45,
+            sampler_name,
+            987,
+            torch.device('cpu'),
+            torch.float32,
+        )
+        outputs.append(output)
+        call_counts.append(fake_sdxl_sampler.calls)
+    sdxl_sampler_results[sampler_name] = {
+        'finite': bool(torch.isfinite(outputs[0]).all()),
+        'deterministic': bool(torch.equal(outputs[0], outputs[1])),
+        'calls': call_counts,
+    }
 
 class FakeAnimaDenoiser:
     def __init__(self):
@@ -159,6 +194,7 @@ anima_latent = anima._sample_anima(
     16,
     2,
     4.0,
+    'flow_euler',
     123,
     torch.device('cpu'),
     torch.bfloat16,
@@ -168,6 +204,21 @@ anima_sampler_precision = bool(
     and fake_sampler.input_dtypes == ['torch.bfloat16', 'torch.bfloat16']
     and fake_sampler.timestep_dtypes == ['torch.bfloat16', 'torch.bfloat16']
 )
+
+fake_heun_sampler = FakeAnimaSamplerDenoiser()
+anima._sample_anima(
+    fake_heun_sampler,
+    torch.zeros((2, 512, 1024), dtype=torch.bfloat16),
+    16,
+    16,
+    2,
+    4.0,
+    'flow_heun',
+    123,
+    torch.device('cpu'),
+    torch.bfloat16,
+)
+anima_heun_evaluations = len(fake_heun_sampler.input_dtypes)
 
 torch.manual_seed(7)
 patch_embed = anima.PatchEmbed()
@@ -221,12 +272,15 @@ print(json.dumps({
     'anima_size_path_error': anima_size_path_error,
     'null_prompt': null_prompt,
     'boolean_steps': boolean_steps,
+    'unbounded_cfg_values': unbounded_cfg_values,
     'generic_session_closed': tracker.closed,
     'partial_context_cleared': session.denoiser.cleared and session.denoiser.cached is None,
     'continuous_timesteps': continuous_timesteps,
+    'sdxl_sampler_results': sdxl_sampler_results,
     'tokenizer_hash_validation': tokenizer_hash_validation,
     'anima_blank_negative_zero': anima_blank_negative_zero,
     'anima_sampler_precision': anima_sampler_precision,
+    'anima_heun_evaluations': anima_heun_evaluations,
     'patch_embed_equivalent': bool(patch_embed_equivalent),
     'cached_attention_equivalent': cached_attention_equivalent,
 }))
@@ -243,6 +297,10 @@ test('worker rejects malformed types and SDXL-incompatible dimensions before mod
   assert.match(results.boolean_steps, /steps is invalid/i);
 });
 
+test('worker accepts any finite CFG value without imposing a range', () => {
+  assert.deepEqual(results.unbounded_cfg_values, [12345.678, -50]);
+});
+
 test('warm worker evicts a session after an unexpected inference exception', () => {
   assert.equal(results.generic_session_closed, true);
 });
@@ -255,6 +313,14 @@ test('SDXL maps Karras sigmas to continuous log-schedule timesteps', () => {
   assert.deepEqual(results.continuous_timesteps, [0, 0.5, 1]);
 });
 
+test('every SDXL sampler is finite and seed-deterministic, with SDE using its two-stage evaluations', () => {
+  for (const [sampler, result] of Object.entries(results.sdxl_sampler_results)) {
+    assert.equal(result.finite, true, `${sampler} produced a non-finite latent`);
+    assert.equal(result.deterministic, true, `${sampler} ignored the supplied seed`);
+    assert.deepEqual(result.calls, sampler === 'dpmpp_sde_karras' ? [5, 5] : [3, 3]);
+  }
+});
+
 test('runtime readiness rejects corrupted tokenizer assets by checksum', () => {
   assert.equal(results.tokenizer_hash_validation, true);
 });
@@ -265,6 +331,10 @@ test('Anima blank negative prompts use canonical zero unconditional conditioning
 
 test('Anima keeps scheduler state in float32 while denoising in model precision', () => {
   assert.equal(results.anima_sampler_precision, true);
+});
+
+test('Anima Flow Heun uses a correction evaluation without cross-step history', () => {
+  assert.equal(results.anima_heun_evaluations, 4);
 });
 
 test('optimized Anima patch embedding matches the explicit zero-channel reference', () => {

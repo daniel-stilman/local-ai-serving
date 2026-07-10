@@ -93,6 +93,11 @@ const IMAGE_SIZES = new Map([
   ['square', { width: 1024, height: 1024 }],
   ['landscape', { width: 1216, height: 832 }],
 ]);
+const IMAGE_SAMPLERS = Object.freeze({
+  anima: new Set(['flow_euler', 'flow_heun']),
+  sdxl: new Set(['dpmpp_sde_karras', 'euler_ancestral_karras', 'euler_karras', 'dpmpp_2m_karras']),
+});
+const DEFAULT_IMAGE_SAMPLERS = Object.freeze({ anima: 'flow_euler', sdxl: 'dpmpp_sde_karras' });
 const modelTypeCache = new Map();
 let activeImageProcess = null;
 let imageGpuReserved = false;
@@ -1076,7 +1081,8 @@ async function handleImageGenerationRequest(req, res) {
   }
 
   const steps = normalizeInteger(payload.steps, 1, 80, selectedModel.recommendedSteps);
-  const cfg = normalizeNumber(payload.cfg, 0, 20, selectedModel.recommendedCfg);
+  const cfg = normalizeFiniteNumber(payload.cfg, selectedModel.recommendedCfg);
+  const sampler = normalizeImageSampler(kind, payload.sampler);
   const runtime = await getImageRuntimeStatus();
   if (!runtime.ok) {
     sendJson(res, 503, { error: runtime.error || 'The direct CUDA image engine is not ready.' });
@@ -1102,6 +1108,7 @@ async function handleImageGenerationRequest(req, res) {
     height: size.height,
     steps,
     cfg,
+    sampler,
     seed,
     loras: selectedLoras.map((lora) => ({ path: lora.filePath, strength: lora.strength })),
   };
@@ -1126,6 +1133,7 @@ async function handleImageGenerationRequest(req, res) {
         height: size.height,
         steps,
         cfg,
+        sampler,
         loras: selectedLoras.map((lora) => ({ id: lora.id, strength: lora.strength })),
       });
     }
@@ -2051,6 +2059,19 @@ function makeUpstreamHeaders(apiKey) {
   }
 
   return headers;
+}
+
+function normalizeFiniteNumber(value, fallback) {
+  if (value === undefined || value === null || value === '') return fallback;
+  const number = Number(value);
+  if (!Number.isFinite(number)) throw makeHttpError('CFG must be a finite number.', 400);
+  return number;
+}
+
+function normalizeImageSampler(kind, value) {
+  const sampler = String(value || DEFAULT_IMAGE_SAMPLERS[kind] || '');
+  if (!IMAGE_SAMPLERS[kind]?.has(sampler)) throw makeHttpError('The selected image sampler is not available.', 400);
+  return sampler;
 }
 
 async function prepareTextBackend(baseUrl, model = '') {

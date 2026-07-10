@@ -817,6 +817,34 @@ test('steps, CFG, and compatible LoRAs are first-class image controls', () => {
   assert.match(loraEngine, /def openclip_kohya_targets/);
 });
 
+test('CFG is unrestricted but finite, and sampler choices are family-specific and persisted', () => {
+  const cfgTag = html.match(/<input\b[^>]*id="imageCfgInput"[^>]*>/)?.[0] || '';
+  assert.match(cfgTag, /step="any"/);
+  assert.doesNotMatch(cfgTag, /\b(?:min|max)=/);
+  assert.match(html, /id="imageSamplerSelect"/);
+  assert.match(html, /id="imageSamplerHint"/);
+  assert.match(app, /samplerByKind:\s*\{\s*anima:\s*'flow_euler',\s*sdxl:\s*'dpmpp_sde_karras'/);
+  assert.match(app, /DPM\+\+ SDE Karras - single-step history/);
+  assert.match(app, /DPM\+\+ 2M Karras - multistep/);
+  assert.match(extractFunctionSource(app, 'generateImage'), /CFG must be a finite number/);
+  assert.doesNotMatch(extractFunctionSource(app, 'generateImage'), /cfg\s*[<>]=?\s*20|20\s*[<>]=?\s*cfg/);
+  assert.match(serverJs, /const cfg = normalizeFiniteNumber\(payload\.cfg/);
+  assert.match(serverJs, /const sampler = normalizeImageSampler\(kind, payload\.sampler\)/);
+  assert.match(imageWorker, /cfg = _finite_number\(payload\.get\("cfg"\), "CFG"\)/);
+  assert.match(imageWorker, /sampler = _sampler\(payload\.get\("sampler"\), kind\)/);
+});
+
+test('single-step-history samplers do not retain prior denoised estimates', () => {
+  const sdeStart = sdxlEngine.indexOf('elif sampler == "dpmpp_sde_karras"');
+  const multistepStart = sdxlEngine.indexOf('elif sampler == "dpmpp_2m_karras"', sdeStart);
+  const samplerEnd = sdxlEngine.indexOf('else:', multistepStart);
+  assert.ok(sdeStart > 0 && multistepStart > sdeStart && samplerEnd > multistepStart);
+  assert.doesNotMatch(sdxlEngine.slice(sdeStart, multistepStart), /previous_denoised|previous_time/);
+  assert.match(sdxlEngine.slice(multistepStart, samplerEnd), /previous_denoised/);
+  assert.match(animaEngine, /sampler == "flow_heun"/);
+  assert.doesNotMatch(animaEngine, /previous_(?:velocity|denoised)/);
+});
+
 test('image generation uses a bespoke warm CUDA worker with no inference framework dependency', () => {
   assert.equal(packageJson.name, 'local-ai-serving');
   assert.equal(packageJson.scripts.configure, 'node scripts/configure.js');
