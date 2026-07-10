@@ -388,14 +388,18 @@ test('browser harness contract includes actual-server dashboard folder setup', (
   assert.match(browserSmokeSource, /Direct text engine ready/);
 });
 
-test('browser harness contract covers persisted model choice, stale replacement, streaming payload, and phone isolation', () => {
+test('browser harness contract covers persisted model choice, mixed multi-turn actions, and phone isolation', () => {
   assert.match(browserSmokeSource, /current stale saved model replacement/);
   assert.match(browserSmokeSource, /unavailable saved model was not replaced and persisted/);
   assert.match(browserSmokeSource, /exercisePersistedChatSelection/);
   assert.match(browserSmokeSource, /Page\.reload/);
   assert.match(browserSmokeSource, /chat payload did not use the persisted second model/);
   assert.match(browserSmokeSource, /text\/event-stream/);
-  assert.match(browserSmokeSource, /Synthetic browser stream complete/);
+  assert.match(browserSmokeSource, /assertTextTurnHistory/);
+  assert.match(browserSmokeSource, /assertMixedMediaHistory/);
+  assert.match(browserSmokeSource, /assertConversationLifecycle/);
+  assert.match(browserSmokeSource, /generateManualImageThroughUi/);
+  assert.match(browserSmokeSource, /exerciseConversationIsolation/);
   assert.match(browserSmokeSource, /synthetic-phone\.invalid/);
   assert.match(browserSmokeSource, /host-resolver-rules/);
   assert.match(browserSmokeSource, /phone-style browser exposed host-local setup/);

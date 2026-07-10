@@ -22,12 +22,36 @@ const LEGACY_BASE_URL = 'http://synthetic-legacy.invalid/v1';
 const EXTERNAL_BASE_URL = 'http://synthetic-external.invalid/v1';
 const TEXT_MODELS = ['synthetic-text-alpha', 'synthetic-text-beta'];
 const STALE_TEXT_MODEL = 'synthetic-text-stale';
-const SYNTHETIC_CHAT_PROMPT = 'Return the synthetic browser stream.';
-const SYNTHETIC_CHAT_RESPONSE = 'Synthetic browser stream complete.';
+const CHAT_TURN_ONE = Object.freeze({
+  prompt: 'Remember the first synthetic detail.',
+  response: 'The first synthetic detail is remembered.',
+});
+const CHAT_TURN_TWO = Object.freeze({
+  prompt: 'Use that detail in a second synthetic turn.',
+  response: 'The second synthetic turn used the remembered detail.',
+});
+const CHAT_IMAGE_TOOL = Object.freeze({
+  prompt: 'Create a synthetic picture with the image tool.',
+  imagePrompt: 'A small synthetic landscape used for browser regression testing.',
+  response: 'The synthetic tool image is ready.',
+});
+const MANUAL_IMAGE_PROMPT = 'A synthetic square made through Image studio.';
+const CHAT_AFTER_IMAGE = Object.freeze({
+  prompt: 'Continue the conversation after both images.',
+  response: 'The conversation continued after both images.',
+  regeneratedResponse: 'The conversation was regenerated after both images.',
+});
+const CHAT_EDITED_TURN = Object.freeze({
+  prompt: 'Continue with an edited follow-up after both images.',
+  response: 'The edited follow-up kept the earlier mixed conversation.',
+});
+const RENAMED_CONVERSATION = 'Synthetic mixed conversation';
+const SYNTHETIC_TOOL_CALL_ID = 'synthetic-image-tool-call';
+const SYNTHETIC_IMAGE_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
 const SYNTHETIC_PHONE_HOST = 'synthetic-phone.invalid';
 const IMAGE_MODELS = ['synthetic-image-anima', 'synthetic-image-sdxl'];
 const API_PATHS = new Set(['/api/config', '/api/models', '/api/image/config']);
-const FIXTURE_API_PATHS = new Set([...API_PATHS, '/api/chat']);
+const FIXTURE_API_PATHS = new Set([...API_PATHS, '/api/chat', '/api/image/generate']);
 const TEXT_LOAD_API_PATHS = new Set(['/api/text/load', '/api/text/status']);
 for (const apiPath of TEXT_LOAD_API_PATHS) FIXTURE_API_PATHS.add(apiPath);
 const ACCESS_REQUIRED_ID = 'accessRequired';
@@ -140,7 +164,7 @@ async function main() {
   }
 
   await runRealServerModelSetupScenario(browserPath);
-  console.log('Browser regression passed: fixture auth/image flows and real-server local text setup are covered.');
+  console.log('Browser regression passed: full mixed-conversation lifecycle, auth/model flows, and real-server setup are covered.');
 }
 
 async function runRealServerModelSetupScenario(browserPath) {
@@ -351,6 +375,7 @@ async function removeRealServerFixture(root) {
 
 function createFixtureServer(requests) {
   const textLoadStates = new Map();
+  const chatPromptCounts = new Map();
   return http.createServer(async (request, response) => {
     try {
       const url = new URL(request.url || '/', 'http://fixture.invalid');
@@ -362,7 +387,7 @@ function createFixtureServer(requests) {
           sendJson(response, 401, { error: 'Access required' }, { 'X-Local-Access-Required': '1' });
           return;
         }
-        await serveApi(url.pathname, response, token, body, textLoadStates);
+        await serveApi(url.pathname, response, token, body, textLoadStates, chatPromptCounts);
         return;
       }
 
@@ -405,7 +430,7 @@ function createFixtureServer(requests) {
   });
 }
 
-async function serveApi(apiPath, response, token, body, textLoadStates) {
+async function serveApi(apiPath, response, token, body, textLoadStates, chatPromptCounts) {
   if (apiPath === '/api/config') {
     sendJson(response, 200, {
       defaultBaseUrl: MANAGED_BASE_URL,
@@ -446,7 +471,24 @@ async function serveApi(apiPath, response, token, body, textLoadStates) {
 
   if (apiPath === '/api/chat') {
     const payload = parseRequestJson(body);
-    sendSyntheticChatStream(response, payload);
+    sendSyntheticChatStream(response, payload, chatPromptCounts);
+    return;
+  }
+
+  if (apiPath === '/api/image/generate') {
+    const payload = parseRequestJson(body);
+    const model = IMAGE_MODELS.includes(payload.model) ? payload.model : IMAGE_MODELS[0];
+    sendJson(response, 200, {
+      imageBase64: SYNTHETIC_IMAGE_BASE64,
+      mimeType: 'image/png',
+      model,
+      seed: 4242,
+      width: 1,
+      height: 1,
+      steps: payload.steps,
+      cfg: payload.cfg,
+      loras: Array.isArray(payload.loras) ? payload.loras : [],
+    });
     return;
   }
 
@@ -466,11 +508,43 @@ function parseRequestJson(value) {
   try { return JSON.parse(value || '{}'); } catch { return {}; }
 }
 
-function sendSyntheticChatStream(response, payload) {
-  const selected = payload.model === TEXT_MODELS[1];
-  const content = selected ? SYNTHETIC_CHAT_RESPONSE : 'Synthetic fixture received the wrong model.';
+function sendSyntheticChatStream(response, payload, chatPromptCounts) {
+  const messages = Array.isArray(payload.messages) ? payload.messages : [];
+  const lastUser = [...messages].reverse().find((message) => message.role === 'user');
+  const hasSyntheticToolResult = messages.some((message) => (
+    message.role === 'tool' && message.tool_call_id === SYNTHETIC_TOOL_CALL_ID
+  ));
+  const prompt = typeof lastUser?.content === 'string' ? lastUser.content : '';
+  const count = (chatPromptCounts.get(prompt) || 0) + 1;
+  chatPromptCounts.set(prompt, count);
+
+  let delta;
+  if (payload.model !== TEXT_MODELS[1]) {
+    delta = { content: 'Synthetic fixture received the wrong model.' };
+  } else if (prompt === CHAT_IMAGE_TOOL.prompt && !hasSyntheticToolResult) {
+    delta = {
+      tool_calls: [{
+        index: 0,
+        id: SYNTHETIC_TOOL_CALL_ID,
+        type: 'function',
+        function: {
+          name: 'generate_image',
+          arguments: JSON.stringify({ prompt: CHAT_IMAGE_TOOL.imagePrompt, orientation: 'landscape' }),
+        },
+      }],
+    };
+  } else {
+    const content = prompt === CHAT_TURN_ONE.prompt ? CHAT_TURN_ONE.response
+      : prompt === CHAT_TURN_TWO.prompt ? CHAT_TURN_TWO.response
+        : prompt === CHAT_IMAGE_TOOL.prompt && hasSyntheticToolResult ? CHAT_IMAGE_TOOL.response
+          : prompt === CHAT_AFTER_IMAGE.prompt && count > 1 ? CHAT_AFTER_IMAGE.regeneratedResponse
+            : prompt === CHAT_AFTER_IMAGE.prompt ? CHAT_AFTER_IMAGE.response
+              : prompt === CHAT_EDITED_TURN.prompt ? CHAT_EDITED_TURN.response
+                : 'Synthetic fixture received an unexpected conversation turn.';
+    delta = { content };
+  }
   const events = [
-    `data: ${JSON.stringify({ choices: [{ delta: { content } }] })}\n\n`,
+    `data: ${JSON.stringify({ choices: [{ delta }] })}\n\n`,
     'data: [DONE]\n\n',
   ];
   response.writeHead(200, {
@@ -572,30 +646,39 @@ function assertScenario(page, scenario, requests) {
     }
     if (scenario.exerciseChat) {
       const chatRequests = requests.filter((entry) => entry.path === '/api/chat');
+      const imageRequests = requests.filter((entry) => entry.path === '/api/image/generate');
       const loadRequests = requests.filter((entry) => entry.path === '/api/text/load');
       const statusRequests = requests.filter((entry) => entry.path === '/api/text/status');
-      assert.equal(chatRequests.length, 1,
-        `${scenario.name}: persisted-model chat produced the wrong request count`);
-      assert.ok(loadRequests.length >= 2,
-        `${scenario.name}: model selection and chat did not both verify managed readiness`);
+      assert.equal(chatRequests.length, 7,
+        `${scenario.name}: full mixed conversation produced the wrong chat request count`);
+      assert.equal(imageRequests.length, 2,
+        `${scenario.name}: assistant-tool and Image-studio flows did not both generate an image`);
+      assert.ok(loadRequests.length >= 8,
+        `${scenario.name}: model selection and every chat round did not verify managed readiness`);
       assert.ok(statusRequests.length >= 2,
         `${scenario.name}: the loading bar did not poll observable backend status`);
       assert.ok(loadRequests.every((entry) => entry.token === scenario.accessToken),
         `${scenario.name}: a model-load request omitted the current access token`);
       assert.ok(loadRequests.every((entry) => parseRequestJson(entry.body).model === TEXT_MODELS[1]),
         `${scenario.name}: a model-load request used the wrong selected model`);
-      const chatPayload = parseRequestJson(chatRequests[0].body);
-      assert.equal(chatRequests[0].token, scenario.accessToken,
-        `${scenario.name}: chat request omitted the current access token`);
-      assert.equal(chatPayload.model, TEXT_MODELS[1],
-        `${scenario.name}: chat payload did not use the persisted second model`);
-      assert.ok(Array.isArray(chatPayload.messages)
-        && chatPayload.messages.some((message) => message.role === 'user' && message.content === SYNTHETIC_CHAT_PROMPT),
-      `${scenario.name}: chat payload omitted the synthetic user prompt`);
+      assert.ok(chatRequests.every((entry) => entry.token === scenario.accessToken),
+        `${scenario.name}: a chat request omitted the current access token`);
+      const chatPayloads = chatRequests.map((entry) => parseRequestJson(entry.body));
+      assert.ok(chatPayloads.every((payload) => payload.model === TEXT_MODELS[1]),
+        `${scenario.name}: a chat payload did not use the persisted second model`);
+      assertTextTurnHistory(chatPayloads, scenario.name);
+      assertMixedMediaHistory(chatPayloads, imageRequests, scenario.name, scenario.accessToken);
       assert.equal(page.chatExercise?.selectedModel, TEXT_MODELS[1],
         `${scenario.name}: second model was not restored after reload`);
-      assert.match(page.chatExercise?.assistantText || '', /Synthetic browser stream complete/,
-        `${scenario.name}: synthetic streaming response was not rendered`);
+      for (const expected of [
+        CHAT_TURN_ONE.response,
+        CHAT_TURN_TWO.response,
+        CHAT_IMAGE_TOOL.response,
+        CHAT_EDITED_TURN.response,
+      ]) {
+        assert.match(page.chatExercise?.assistantText || '', new RegExp(escapeRegExp(expected)),
+          `${scenario.name}: an expected multi-turn response was not rendered`);
+      }
       assert.equal(page.chatExercise?.selectionLoad?.visible, true,
         `${scenario.name}: switching models did not reveal the loading bar`);
       assert.equal(page.chatExercise?.selectionLoad?.indeterminate, true,
@@ -608,6 +691,7 @@ function assertScenario(page, scenario, requests) {
         `${scenario.name}: chat did not expose model readiness work before streaming`);
       assert.equal(page.storedState.settings.model, TEXT_MODELS[1],
         `${scenario.name}: second model selection was not retained after chat`);
+      assertConversationLifecycle(page.chatExercise, scenario.name);
     }
     return;
   }
@@ -635,6 +719,124 @@ function assertScenario(page, scenario, requests) {
     assert.ok(apiRequests.every((entry) => entry.token === ''),
       `${scenario.name}: frontend sent an unexpected access credential`);
   }
+}
+
+function assertTextTurnHistory(payloads, scenarioName) {
+  const expectedUserTurns = [
+    [CHAT_TURN_ONE.prompt],
+    [CHAT_TURN_ONE.prompt, CHAT_TURN_TWO.prompt],
+    [CHAT_TURN_ONE.prompt, CHAT_TURN_TWO.prompt, CHAT_IMAGE_TOOL.prompt],
+    [CHAT_TURN_ONE.prompt, CHAT_TURN_TWO.prompt, CHAT_IMAGE_TOOL.prompt],
+    [CHAT_TURN_ONE.prompt, CHAT_TURN_TWO.prompt, CHAT_IMAGE_TOOL.prompt, CHAT_AFTER_IMAGE.prompt],
+    [CHAT_TURN_ONE.prompt, CHAT_TURN_TWO.prompt, CHAT_IMAGE_TOOL.prompt, CHAT_AFTER_IMAGE.prompt],
+    [CHAT_TURN_ONE.prompt, CHAT_TURN_TWO.prompt, CHAT_IMAGE_TOOL.prompt, CHAT_EDITED_TURN.prompt],
+  ];
+  payloads.forEach((payload, index) => {
+    assert.equal(payload.messages?.[0]?.role, 'system',
+      `${scenarioName}: chat round ${index + 1} lost the system prompt`);
+    assert.deepEqual(
+      (payload.messages || []).filter((message) => message.role === 'user').map((message) => message.content),
+      expectedUserTurns[index],
+      `${scenarioName}: chat round ${index + 1} sent the wrong ordered user history`,
+    );
+  });
+  assert.ok(payloads[1].messages.some((message) => (
+    message.role === 'assistant' && message.content === CHAT_TURN_ONE.response
+  )), `${scenarioName}: the second turn omitted the first assistant answer`);
+  assert.ok(payloads[2].messages.some((message) => (
+    message.role === 'assistant' && message.content === CHAT_TURN_TWO.response
+  )), `${scenarioName}: the third turn omitted the second assistant answer`);
+  assert.ok(!payloads[6].messages.some((message) => (
+    message.content === CHAT_AFTER_IMAGE.prompt
+      || message.content === CHAT_AFTER_IMAGE.response
+      || message.content === CHAT_AFTER_IMAGE.regeneratedResponse
+  )), `${scenarioName}: editing did not truncate the replaced user turn and its answer from model context`);
+}
+
+function assertMixedMediaHistory(payloads, imageRequests, scenarioName, accessToken) {
+  const toolFollowUp = payloads[3].messages || [];
+  const toolCall = toolFollowUp.find((message) => (
+    message.role === 'assistant'
+      && message.tool_calls?.[0]?.id === SYNTHETIC_TOOL_CALL_ID
+      && message.tool_calls?.[0]?.function?.name === 'generate_image'
+  ));
+  const toolResult = toolFollowUp.find((message) => (
+    message.role === 'tool' && message.tool_call_id === SYNTHETIC_TOOL_CALL_ID
+  ));
+  assert.ok(toolCall, `${scenarioName}: assistant image-tool call was not retained in follow-up context`);
+  assert.ok(toolResult, `${scenarioName}: generated image result was not returned to the text model`);
+  assert.deepEqual(JSON.parse(toolCall.tool_calls[0].function.arguments), {
+    prompt: CHAT_IMAGE_TOOL.imagePrompt,
+    orientation: 'landscape',
+  }, `${scenarioName}: assistant image-tool arguments changed before follow-up`);
+  assert.equal(JSON.parse(toolResult.content).ok, true,
+    `${scenarioName}: successful image generation was not reported as a successful tool result`);
+
+  const mixedTextPayloads = payloads.slice(4);
+  assert.ok(mixedTextPayloads.every((payload) => !(payload.messages || []).some((message) => (
+    message.content === MANUAL_IMAGE_PROMPT || message.role === 'image'
+  ))), `${scenarioName}: manual image cards leaked into the text-only backend history`);
+  assert.ok(mixedTextPayloads.every((payload) => (payload.messages || []).some((message) => (
+    message.role === 'tool' && message.tool_call_id === SYNTHETIC_TOOL_CALL_ID
+  ))), `${scenarioName}: mixed follow-up lost the earlier assistant image-tool result`);
+
+  const imagePayloads = imageRequests.map((entry) => parseRequestJson(entry.body));
+  assert.deepEqual(imagePayloads.map((payload) => payload.prompt), [
+    CHAT_IMAGE_TOOL.imagePrompt,
+    MANUAL_IMAGE_PROMPT,
+  ], `${scenarioName}: image-tool and Image-studio prompts reached the backend in the wrong order`);
+  assert.ok(imageRequests.every((entry) => entry.token === accessToken),
+    `${scenarioName}: an image-generation request omitted current access`);
+}
+
+function assertConversationLifecycle(exercise, scenarioName) {
+  for (const key of ['mixedBeforeReload', 'mixedAfterReload']) {
+    const snapshot = exercise?.[key] || {};
+    assert.equal(snapshot.messageCount, 11,
+      `${scenarioName}: ${key} stored the wrong mixed-conversation message count`);
+    assert.equal(snapshot.visibleMessageCount, 9,
+      `${scenarioName}: ${key} rendered hidden tool protocol messages as chat cards`);
+    assert.equal(snapshot.imageCount, 2,
+      `${scenarioName}: ${key} did not retain both generated image messages`);
+    assert.equal(snapshot.generatedImageCount, 2,
+      `${scenarioName}: ${key} did not hydrate both generated image blobs`);
+    assert.equal(snapshot.kinds.filter((kind) => kind === 'tool-result').length, 1,
+      `${scenarioName}: ${key} lost the image tool result`);
+    assert.equal(snapshot.kinds.filter((kind) => kind === 'image-prompt').length, 1,
+      `${scenarioName}: ${key} lost the manual Image-studio prompt card`);
+  }
+  assert.deepEqual(exercise.mixedAfterReload.kinds, exercise.mixedBeforeReload.kinds,
+    `${scenarioName}: mixed message types changed across reload`);
+  assert.deepEqual(exercise.mixedAfterReload.contents, exercise.mixedBeforeReload.contents,
+    `${scenarioName}: mixed message content changed across reload`);
+  assert.equal(exercise.afterRegenerate?.messageCount, 13,
+    `${scenarioName}: regeneration appended instead of replacing the last answer`);
+  assert.ok(exercise.afterRegenerate?.contents.includes(CHAT_AFTER_IMAGE.regeneratedResponse),
+    `${scenarioName}: regenerated answer was not persisted`);
+  assert.ok(!exercise.afterRegenerate?.contents.includes(CHAT_AFTER_IMAGE.response),
+    `${scenarioName}: replaced answer remained after regeneration`);
+  assert.equal(exercise.afterEdit?.messageCount, 11,
+    `${scenarioName}: editing did not truncate from the selected user turn`);
+  assert.equal(exercise.afterEdit?.promptValue, CHAT_AFTER_IMAGE.prompt,
+    `${scenarioName}: editing did not restore the selected user text to the composer`);
+  assert.equal(exercise.afterEditedTurn?.messageCount, 13,
+    `${scenarioName}: edited follow-up did not rebuild the mixed conversation cleanly`);
+  assert.ok(exercise.afterEditedTurn?.contents.includes(CHAT_EDITED_TURN.response),
+    `${scenarioName}: edited follow-up answer was not persisted`);
+  assert.deepEqual(exercise.conversationIsolation?.created, {
+    title: 'New chat', conversationCount: 2, messageCount: 0,
+  }, `${scenarioName}: new conversation was not isolated`);
+  assert.deepEqual(exercise.conversationIsolation?.switchedAndDeleted, {
+    title: RENAMED_CONVERSATION, conversationCount: 1, imageCount: 2,
+  }, `${scenarioName}: switching/deleting conversations damaged the mixed chat`);
+  assert.equal(exercise.afterClear?.title, RENAMED_CONVERSATION,
+    `${scenarioName}: clear unexpectedly renamed the conversation`);
+  assert.equal(exercise.afterClear?.messageCount, 0,
+    `${scenarioName}: clear left persisted messages behind`);
+  assert.equal(exercise.afterClear?.visibleMessageCount, 0,
+    `${scenarioName}: clear left visible message cards behind`);
+  assert.equal(exercise.afterClear?.conversationCount, 1,
+    `${scenarioName}: clear removed the conversation container`);
 }
 
 function assertAppearance(appearance, scenarioName, viewport) {
@@ -1200,47 +1402,260 @@ async function exercisePersistedChatSelection(cdp, sessionId, scenario) {
     return select && !select.disabled && select.value === ${JSON.stringify(selectedModel)};
   })()`, 'The second text model was not restored after reload.');
 
+  const firstTurn = await submitConversationPrompt(cdp, sessionId, CHAT_TURN_ONE.prompt, CHAT_TURN_ONE.response);
+  const chatLoad = firstTurn.loading;
+  assert.equal(chatLoad.visible, true,
+    'conversation fixture: chat did not reveal managed model loading state');
+  await submitConversationPrompt(cdp, sessionId, CHAT_TURN_TWO.prompt, CHAT_TURN_TWO.response);
+  await submitConversationPrompt(cdp, sessionId, CHAT_IMAGE_TOOL.prompt, CHAT_IMAGE_TOOL.response);
+  await waitForGeneratedImages(cdp, sessionId, 1, 'The assistant image tool did not render its generated image.');
+
+  await generateManualImageThroughUi(cdp, sessionId);
+  await waitForGeneratedImages(cdp, sessionId, 2, 'Image studio did not render its generated image.');
+  const mixedBeforeReload = await readConversationSnapshot(cdp, sessionId);
+
+  await reloadConversationPage(cdp, sessionId, scenario);
+  await waitForGeneratedImages(cdp, sessionId, 2, 'Generated images did not survive a full-page reload.');
+  const mixedAfterReload = await readConversationSnapshot(cdp, sessionId);
+
+  await submitConversationPrompt(cdp, sessionId, CHAT_AFTER_IMAGE.prompt, CHAT_AFTER_IMAGE.response);
+  await clickConversationAction(cdp, sessionId, 'regenerateButton');
+  await waitForBrowserExpression(cdp, sessionId, `(() => {
+    const text = document.getElementById('messages')?.textContent || '';
+    return text.includes(${JSON.stringify(CHAT_AFTER_IMAGE.regeneratedResponse)})
+      && !text.includes(${JSON.stringify(CHAT_AFTER_IMAGE.response)});
+  })()`, 'Regenerating did not replace the last assistant answer.');
+  const afterRegenerate = await readConversationSnapshot(cdp, sessionId);
+
+  const edited = await cdp.send('Runtime.evaluate', {
+    expression: `(() => {
+      const message = Array.from(document.querySelectorAll('.message.user')).find(node => (
+        node.querySelector('.message-content')?.textContent.trim() === ${JSON.stringify(CHAT_AFTER_IMAGE.prompt)}
+      ));
+      const edit = Array.from(message?.querySelectorAll('button') || []).find(button => button.textContent.trim() === 'Edit');
+      if (!edit) return false;
+      edit.click();
+      return true;
+    })()`,
+    returnByValue: true,
+  }, sessionId);
+  assert.equal(edited.result?.value, true, 'conversation fixture: the last user turn could not be edited');
+  await waitForBrowserExpression(cdp, sessionId, `(() => {
+    const prompt = document.getElementById('promptInput');
+    const text = document.getElementById('messages')?.textContent || '';
+    return prompt?.value === ${JSON.stringify(CHAT_AFTER_IMAGE.prompt)}
+      && !text.includes(${JSON.stringify(CHAT_AFTER_IMAGE.regeneratedResponse)});
+  })()`, 'Editing did not restore and truncate the selected user turn.');
+  const afterEdit = await readConversationSnapshot(cdp, sessionId);
+  await submitConversationPrompt(cdp, sessionId, CHAT_EDITED_TURN.prompt, CHAT_EDITED_TURN.response);
+  const afterEditedTurn = await readConversationSnapshot(cdp, sessionId);
+
+  await cdp.send('Runtime.evaluate', {
+    expression: `window.prompt = () => ${JSON.stringify(RENAMED_CONVERSATION)}`,
+  }, sessionId);
+  await clickConversationAction(cdp, sessionId, 'renameButton');
+  await waitForBrowserExpression(cdp, sessionId, `(() => (
+    document.getElementById('conversationTitle')?.textContent.trim() === ${JSON.stringify(RENAMED_CONVERSATION)}
+  ))()`, 'Renaming did not update the active conversation title.');
+  await reloadConversationPage(cdp, sessionId, scenario);
+  await waitForGeneratedImages(cdp, sessionId, 2, 'Mixed conversation images disappeared after the renamed chat reloaded.');
+
+  const conversationIsolation = await exerciseConversationIsolation(cdp, sessionId);
+  await cdp.send('Runtime.evaluate', { expression: 'window.confirm = () => true' }, sessionId);
+  await clickConversationAction(cdp, sessionId, 'clearButton');
+  await waitForBrowserExpression(cdp, sessionId, `(() => (
+    document.querySelectorAll('.message').length === 0
+      && Boolean(document.querySelector('.empty-state'))
+  ))()`, 'Clearing did not return the active conversation to its empty state.');
+  const afterClear = await readConversationSnapshot(cdp, sessionId);
+
+  const result = await cdp.send('Runtime.evaluate', {
+    expression: `(() => ({
+      selectedModel: document.getElementById('modelSelect').value,
+    }))()`,
+    returnByValue: true,
+  }, sessionId);
+  return {
+    ...(result.result?.value || {}),
+    assistantText: afterEditedTurn.contents.join(' '),
+    selectionLoad,
+    selectionReady,
+    chatLoad,
+    mixedBeforeReload,
+    mixedAfterReload,
+    afterRegenerate,
+    afterEdit,
+    afterEditedTurn,
+    conversationIsolation,
+    afterClear,
+  };
+}
+
+async function submitConversationPrompt(cdp, sessionId, promptText, expectedResponse) {
   const submitted = await cdp.send('Runtime.evaluate', {
     expression: `(() => {
       const prompt = document.getElementById('promptInput');
       const send = document.getElementById('sendButton');
       if (!prompt || !send || send.disabled) return { submitted: false };
-      prompt.value = ${JSON.stringify(SYNTHETIC_CHAT_PROMPT)};
+      prompt.value = ${JSON.stringify(promptText)};
       prompt.dispatchEvent(new Event('input', { bubbles: true }));
       send.click();
       const loading = document.getElementById('modelLoading');
       const progress = document.getElementById('modelLoadingProgress');
       return {
         submitted: true,
-        visible: Boolean(loading && !loading.hidden),
-        indeterminate: Boolean(progress && !progress.hasAttribute('value')),
+        loading: {
+          visible: Boolean(loading && !loading.hidden),
+          indeterminate: Boolean(progress && !progress.hasAttribute('value')),
+        },
       };
     })()`,
     returnByValue: true,
   }, sessionId);
-  const chatLoad = submitted.result?.value || {};
-  assert.equal(chatLoad.submitted, true,
-    'stream fixture: chat form could not be submitted');
-  assert.equal(chatLoad.visible, true,
-    'stream fixture: chat did not reveal managed model loading state');
-  await waitForBrowserExpression(cdp, sessionId, `(() => {
-    const messages = Array.from(document.querySelectorAll('.message.assistant .message-content'));
-    return messages.some(message => message.textContent.includes(${JSON.stringify(SYNTHETIC_CHAT_RESPONSE)}));
-  })()`, 'The synthetic streaming chat response did not render.');
-  const result = await cdp.send('Runtime.evaluate', {
-    expression: `(() => ({
-      selectedModel: document.getElementById('modelSelect').value,
-      assistantText: Array.from(document.querySelectorAll('.message.assistant .message-content'))
-        .map(message => message.textContent.trim()).join(' '),
-    }))()`,
+  assert.equal(submitted.result?.value?.submitted, true,
+    `conversation fixture: could not submit ${JSON.stringify(promptText)}`);
+  await waitForBrowserExpression(cdp, sessionId, `(() => (
+    Array.from(document.querySelectorAll('.message.assistant .message-content'))
+      .some(message => message.textContent.includes(${JSON.stringify(expectedResponse)}))
+      && !document.getElementById('promptInput')?.disabled
+  ))()`, `The expected response for ${JSON.stringify(promptText)} did not render.`);
+  return submitted.result?.value || {};
+}
+
+async function generateManualImageThroughUi(cdp, sessionId) {
+  const opened = await cdp.send('Runtime.evaluate', {
+    expression: `(() => {
+      const open = document.getElementById('imageButton');
+      if (!open || open.disabled) return false;
+      open.click();
+      return Boolean(document.getElementById('imageDialog')?.open);
+    })()`,
     returnByValue: true,
   }, sessionId);
-  return {
-    ...(result.result?.value || {}),
-    selectionLoad,
-    selectionReady,
-    chatLoad,
-  };
+  assert.equal(opened.result?.value, true,
+    'conversation fixture: Image studio could not be opened');
+  await waitForBrowserExpression(cdp, sessionId, `(() => {
+    const dialog = document.getElementById('imageDialog');
+    const generate = document.getElementById('generateImageButton');
+    return Boolean(dialog?.open && generate && !generate.disabled);
+  })()`, 'Image studio did not finish refreshing its model list.');
+  const generated = await cdp.send('Runtime.evaluate', {
+    expression: `(() => {
+      const prompt = document.getElementById('imagePromptInput');
+      const generate = document.getElementById('generateImageButton');
+      if (!prompt || !generate || generate.disabled) return false;
+      prompt.value = ${JSON.stringify(MANUAL_IMAGE_PROMPT)};
+      prompt.dispatchEvent(new Event('input', { bubbles: true }));
+      generate.click();
+      return true;
+    })()`,
+    returnByValue: true,
+  }, sessionId);
+  assert.equal(generated.result?.value, true,
+    'conversation fixture: Image studio could not submit a manual image prompt');
+}
+
+async function waitForGeneratedImages(cdp, sessionId, expectedCount, timeoutMessage) {
+  await waitForBrowserExpression(cdp, sessionId, `(() => {
+    const imageMessages = Array.from(document.querySelectorAll('.message.kind-image'));
+    const images = Array.from(document.querySelectorAll('.generated-image'));
+    return imageMessages.length === ${expectedCount}
+      && images.length === ${expectedCount}
+      && images.every(image => image.complete && image.naturalWidth > 0);
+  })()`, timeoutMessage);
+}
+
+async function reloadConversationPage(cdp, sessionId, scenario) {
+  await cdp.send('Runtime.evaluate', {
+    expression: "window.__browserSmokeReloadMarker = 'before'",
+  }, sessionId);
+  await cdp.send('Page.reload', { ignoreCache: true }, sessionId);
+  await waitForBrowserExpression(cdp, sessionId, `(() => (
+    document.readyState === 'complete' && window.__browserSmokeReloadMarker !== 'before'
+  ))()`, 'The mixed conversation page did not reload.');
+  await waitForBrowserExpression(cdp, sessionId, pageReadinessExpression(scenario),
+    'The mixed conversation page did not settle after reload.');
+}
+
+async function clickConversationAction(cdp, sessionId, actionId) {
+  const clicked = await cdp.send('Runtime.evaluate', {
+    expression: `(() => {
+      const menu = document.getElementById('conversationMenuButton');
+      const action = document.getElementById(${JSON.stringify(actionId)});
+      if (!menu || !action || action.disabled) return false;
+      menu.click();
+      if (!document.getElementById('conversationActionsDialog')?.open) return false;
+      action.click();
+      return true;
+    })()`,
+    returnByValue: true,
+  }, sessionId);
+  assert.equal(clicked.result?.value, true,
+    `conversation fixture: action ${actionId} could not be invoked through the app menu`);
+}
+
+async function exerciseConversationIsolation(cdp, sessionId) {
+  const created = await cdp.send('Runtime.evaluate', {
+    expression: `(() => {
+      document.getElementById('newChatButton')?.click();
+      return {
+        title: document.getElementById('conversationTitle')?.textContent.trim(),
+        conversationCount: document.querySelectorAll('.conversation-item').length,
+        messageCount: document.querySelectorAll('.message').length,
+      };
+    })()`,
+    returnByValue: true,
+  }, sessionId);
+  assert.deepEqual(created.result?.value, { title: 'New chat', conversationCount: 2, messageCount: 0 },
+    'conversation fixture: creating a new chat did not isolate it from the mixed conversation');
+
+  const switchedAndDeleted = await cdp.send('Runtime.evaluate', {
+    expression: `(() => {
+      const items = Array.from(document.querySelectorAll('.conversation-item'));
+      const oldItem = items.find(item => item.querySelector('.conversation-name')?.textContent.trim() === ${JSON.stringify(RENAMED_CONVERSATION)});
+      oldItem?.querySelector('.conversation-open')?.click();
+      const newItem = Array.from(document.querySelectorAll('.conversation-item')).find(item => (
+        item.querySelector('.conversation-name')?.textContent.trim() === 'New chat'
+      ));
+      newItem?.querySelector('.delete-chat')?.click();
+      return {
+        title: document.getElementById('conversationTitle')?.textContent.trim(),
+        conversationCount: document.querySelectorAll('.conversation-item').length,
+        imageCount: document.querySelectorAll('.message.kind-image').length,
+      };
+    })()`,
+    returnByValue: true,
+  }, sessionId);
+  assert.deepEqual(switchedAndDeleted.result?.value, {
+    title: RENAMED_CONVERSATION,
+    conversationCount: 1,
+    imageCount: 2,
+  }, 'conversation fixture: switching back or deleting the isolated new chat changed the original conversation');
+  return { created: created.result?.value, switchedAndDeleted: switchedAndDeleted.result?.value };
+}
+
+async function readConversationSnapshot(cdp, sessionId) {
+  const snapshot = await cdp.send('Runtime.evaluate', {
+    expression: `(() => {
+      let saved = {};
+      try { saved = JSON.parse(localStorage.getItem(${JSON.stringify(STATE_STORAGE_KEY)}) || '{}'); } catch {}
+      const active = (saved.conversations || []).find(item => item.id === saved.activeConversationId) || {};
+      return {
+        title: active.title || '',
+        roles: (active.messages || []).map(message => message.role),
+        kinds: (active.messages || []).map(message => message.kind || 'text'),
+        contents: (active.messages || []).map(message => message.content || ''),
+        messageCount: (active.messages || []).length,
+        visibleMessageCount: document.querySelectorAll('.message').length,
+        imageCount: document.querySelectorAll('.message.kind-image').length,
+        generatedImageCount: document.querySelectorAll('.generated-image').length,
+        promptValue: document.getElementById('promptInput')?.value || '',
+        conversationCount: (saved.conversations || []).length,
+      };
+    })()`,
+    returnByValue: true,
+  }, sessionId);
+  return snapshot.result?.value || {};
 }
 
 function pageReadinessExpression(scenario) {
