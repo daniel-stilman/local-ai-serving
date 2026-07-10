@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#008080">
+    <title>Local LLM Access Dashboard</title>
+    <link rel="stylesheet" href="/dashboard.css">
+  </head>
+  <body>
+    <main class="dashboard-window">
+      <header class="titlebar">
+        <div>
+          <p>ACCESS.EXE</p>
+          <h1>Scan to open local chat</h1>
+        </div>
+        <span id="securityMode">HTTPS</span>
+      </header>
+
+      <section class="dashboard-grid">
+        <div class="qr-panel">
+          <div id="qrCode" class="qr-code" aria-label="Access QR code"></div>
+          <p class="qr-caption">QR includes a server access token. Share it only with devices you trust.</p>
+        </div>
+
+        <div class="details-panel">
+          <label class="field">
+            <span>LAN URL</span>
+            <select id="urlSelect"></select>
+          </label>
+
+          <label class="field">
+            <span>Access link</span>
+            <input id="accessUrl" readonly>
+          </label>
+
+          <div class="actions">
+            <button id="copyButton" type="button">Copy Link</button>
+            <button id="refreshButton" type="button">Refresh</button>
+          </div>
+
+          <dl class="facts">
+            <div>
+              <dt>Token</dt>
+              <dd id="tokenInfo">Loading</dd>
+            </div>
+            <div>
+              <dt>Certificate</dt>
+              <dd id="certificateInfo">Loading</dd>
+            </div>
+          </dl>
+        </div>
+      </section>
+
+      <section class="setup-panel" id="models" aria-labelledby="modelsTitle">
+        <div class="setup-titlebar">
+          <div>
+            <p>MODELS.EXE</p>
+            <h2 id="modelsTitle">Local text models</h2>
+          </div>
+          <span id="modelSetupBadge">Checking</span>
+        </div>
+
+        <div class="setup-grid">
+          <div class="setup-controls">
+            <p class="setup-copy">
+              Choose the folder containing your GGUF language models. The folder is saved only in this server's local configuration file on this computer.
+            </p>
+
+            <dl class="facts setup-facts">
+              <div>
+                <dt>Text runtime</dt>
+                <dd id="textRuntimeStatus">Checking</dd>
+              </div>
+              <div>
+                <dt>Model folder</dt>
+                <dd id="textFolderStatus">Checking</dd>
+              </div>
+              <div>
+                <dt>Selectable models</dt>
+                <dd id="textModelCount">Checking</dd>
+              </div>
+            </dl>
+
+            <label class="field setup-folder-field">
+              <span>GGUF model folder on this computer</span>
+              <input id="textModelsRootInput" type="text" autocomplete="off" spellcheck="false" placeholder="Choose or paste an absolute folder path">
+            </label>
+
+            <div class="actions setup-actions">
+              <button id="pickTextModelsRootButton" type="button">Browse...</button>
+              <button id="saveTextModelsRootButton" type="button">Use This Folder</button>
+              <button id="refreshModelSetupButton" type="button">Refresh</button>
+            </div>
+            <p class="setup-message" id="modelSetupMessage" role="status" aria-live="polite"></p>
+          </div>
+
+          <div class="model-list-panel">
+            <h3>Available in chat</h3>
+            <ul id="textModelList" class="model-list">
+              <li>Checking local configuration...</li>
+            </ul>
+            <a class="button-link" href="/">Open Chat</a>
+          </div>
+        </div>
+      </section>
+
+      <p class="notice">
+        Local HTTPS uses a self-signed certificate. Your phone may show a browser warning until you accept or trust it.
+      </p>
+    </main>
+
+    <script src="/dashboard.js" defer></script>
+  </body>
+</html>

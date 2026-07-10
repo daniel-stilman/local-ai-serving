@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#008080">
+    <title>Local Chat</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" id="sidebar" aria-label="Chat list">
+        <div class="sidebar-header">
+          <div>
+            <span class="brand-mark" aria-hidden="true">L</span>
+            <span class="brand-name">Local Chat</span>
+          </div>
+          <button class="icon-button mobile-only" id="closeSidebarButton" type="button" aria-label="Close chat list">X</button>
+        </div>
+        <button class="primary-button new-chat-button" id="newChatButton" type="button">
+          <span aria-hidden="true">+</span>
+          New conversation
+        </button>
+        <div class="conversation-list" id="conversationList" aria-label="Conversations"></div>
+      </aside>
+      <button class="sidebar-overlay mobile-only" id="sidebarOverlay" type="button" aria-label="Close chat list"></button>
+
+      <main class="chat-layout">
+        <header class="topbar">
+          <button class="icon-button mobile-only" id="openSidebarButton" type="button" aria-label="Open chat list">=</button>
+          <div class="title-block">
+            <h1 id="conversationTitle" class="title-input">New chat</h1>
+            <div class="status-line" role="status">
+              <span class="status-dot" id="statusDot" aria-hidden="true"></span>
+              <span id="statusText">Connecting</span>
+            </div>
+          </div>
+          <button class="model-button" id="chatSetupButton" type="button" aria-label="Choose chat model">
+            <span class="model-button-label">Model</span>
+            <span id="modelSummary">Choose</span>
+          </button>
+          <button class="icon-button" id="conversationMenuButton" type="button" aria-label="Conversation actions">...</button>
+        </header>
+
+        <section class="model-loading" id="modelLoading" role="status" aria-live="polite" hidden>
+          <div class="model-loading-copy">
+            <strong>Text model</strong>
+            <span id="modelLoadingText">Loading selected model</span>
+          </div>
+          <progress id="modelLoadingProgress" aria-label="Text model loading progress"></progress>
+        </section>
+
+        <section class="access-required" id="accessRequired" role="alert" aria-live="assertive" aria-labelledby="accessRequiredTitle" hidden>
+          <div class="access-required-window">
+            <div class="access-required-titlebar">Local access</div>
+            <div class="access-required-body">
+              <h2 id="accessRequiredTitle">Access required</h2>
+              <p>Scan the current QR code from the local dashboard before loading text or image models.</p>
+              <p class="access-required-note">The access link changes whenever the server restarts.</p>
+            </div>
+          </div>
+        </section>
+
+        <section class="messages" id="messages" aria-live="polite" aria-label="Conversation"></section>
+
+        <footer class="composer">
+          <div class="composer-box">
+            <button class="tool-button" id="imageButton" type="button" aria-label="Create an image">
+              <span aria-hidden="true">IMG</span>
+              <span class="tool-button-label">Image</span>
+            </button>
+            <textarea id="promptInput" rows="1" placeholder="Message" aria-label="Message"></textarea>
+            <button class="send-button" id="sendButton" type="button">Send</button>
+            <button class="send-button stop" id="stopButton" type="button" hidden>Stop</button>
+          </div>
+          <div class="composer-meta">
+            <span id="hintText" class="meta-cell meta-grow">Enter to send, Shift+Enter for a new line</span>
+            <span id="imageToolStatus" class="meta-cell"></span>
+            <span id="charCount" class="meta-cell">0</span>
+          </div>
+        </footer>
+      </main>
+    </div>
+
+    <dialog class="sheet-dialog" id="settingsDialog">
+      <form method="dialog" class="sheet-panel">
+        <div class="sheet-header">
+          <div>
+            <p class="sheet-eyebrow">CHAT</p>
+            <h2>Model and settings</h2>
+          </div>
+          <button class="icon-button" value="cancel" type="submit" aria-label="Close chat settings">X</button>
+        </div>
+
+        <div class="connection-card">
+          <div class="connection-card-copy">
+            <strong>Text backend</strong>
+            <span>Choose the model used for this conversation.</span>
+          </div>
+          <button class="secondary-button" id="refreshModelsButton" type="button">Refresh</button>
+        </div>
+
+        <label class="field">
+          <span>Chat model</span>
+          <select id="modelSelect" aria-label="Chat model"></select>
+        </label>
+
+        <div class="local-model-setup" aria-live="polite">
+          <a id="localModelSetupLink" href="/dashboard#models" hidden>Choose local model folder</a>
+          <span id="localModelSetupGuidance">To choose a local model folder, open the dashboard on the computer running this server.</span>
+        </div>
+
+        <label class="field">
+          <span>Thinking mode</span>
+          <select id="thinkingModeSelect" aria-label="Thinking mode">
+            <option value="auto">Auto</option>
+            <option value="on">On</option>
+            <option value="off">Off</option>
+          </select>
+        </label>
+
+        <details class="advanced-panel">
+          <summary>Advanced connection and generation settings</summary>
+          <div class="advanced-content">
+            <label class="field">
+              <span>Text backend base URL</span>
+              <input id="baseUrlInput" type="url" inputmode="url" autocomplete="off" spellcheck="false">
+            </label>
+
+            <label class="field">
+              <span>API key</span>
+              <input id="apiKeyInput" type="password" autocomplete="off" placeholder="Optional, never saved">
+            </label>
+
+            <label class="field">
+              <span>System prompt</span>
+              <textarea id="systemPromptInput" rows="4" spellcheck="true"></textarea>
+            </label>
+
+            <div class="settings-grid">
+              <label class="field">
+                <span>Temperature <output id="temperatureOutput"></output></span>
+                <input id="temperatureInput" type="range" min="0" max="2" step="0.05">
+              </label>
+
+              <label class="field">
+                <span>Max tokens</span>
+                <input id="maxTokensInput" type="number" min="1" max="131072" step="1">
+              </label>
+            </div>
+          </div>
+        </details>
+
+        <div class="sheet-actions three-actions">
+          <button class="secondary-button" id="testConnectionButton" type="button">Test</button>
+          <button class="secondary-button" id="resetSettingsButton" type="button">Reset</button>
+          <button class="primary-button" id="saveSettingsButton" value="default" type="submit">Save</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog class="sheet-dialog image-dialog" id="imageDialog">
+      <form method="dialog" class="sheet-panel" id="imageForm">
+        <div class="sheet-header">
+          <div>
+            <p class="sheet-eyebrow">IMAGE</p>
+            <h2>Image studio</h2>
+          </div>
+          <button class="icon-button" value="cancel" type="submit" aria-label="Close image settings">X</button>
+        </div>
+
+        <div class="image-model-toolbar">
+          <span id="imageConnectionText" role="status">Loading models...</span>
+          <button class="text-button" id="refreshImageModelsButton" type="button">Reload</button>
+        </div>
+
+        <label class="check-field">
+          <input type="checkbox" id="imageToolToggle" checked>
+          <span>Give the chat assistant an image tool</span>
+        </label>
+        <p class="field-note">When you ask for a picture in chat, the assistant draws it here using the settings below. It only writes the prompt; you stay in charge of everything else.</p>
+
+        <div class="settings-grid image-model-grid">
+          <label class="field">
+            <span>Model family</span>
+            <select id="imageKindSelect">
+              <option value="anima">Anima</option>
+              <option value="sdxl">SDXL</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Model</span>
+            <select id="imageModelSelect"></select>
+          </label>
+        </div>
+
+        <label class="field">
+          <span>Canvas</span>
+          <select id="imageSizeSelect">
+            <option value="portrait">Portrait - 832 x 1216</option>
+            <option value="square">Square - 1024 x 1024</option>
+            <option value="landscape">Landscape - 1216 x 832</option>
+          </select>
+        </label>
+
+        <div class="settings-grid image-parameter-grid">
+          <label class="field">
+            <span>Steps</span>
+            <input id="imageStepsInput" type="number" min="1" max="80" step="1">
+          </label>
+          <label class="field">
+            <span>CFG</span>
+            <input id="imageCfgInput" type="number" min="0" max="20" step="0.1">
+          </label>
+        </div>
+
+        <section class="lora-picker" aria-labelledby="imageLoraHeading">
+          <div class="lora-picker-header">
+            <div>
+              <h3 id="imageLoraHeading">LoRAs</h3>
+              <p id="imageLoraHint">Optional model adjustments</p>
+            </div>
+            <button class="text-button" id="addImageLoraButton" type="button">Add LoRA</button>
+          </div>
+          <div class="lora-list" id="imageLoraList"></div>
+        </section>
+
+        <details class="advanced-panel">
+          <summary>More options</summary>
+          <div class="advanced-content">
+            <label class="field">
+              <span>Negative prompt</span>
+              <textarea id="negativePromptInput" rows="3" maxlength="3000" placeholder="Optional"></textarea>
+            </label>
+            <label class="field">
+              <span>Seed</span>
+              <input id="imageSeedInput" type="number" min="0" step="1" placeholder="Random">
+            </label>
+          </div>
+        </details>
+
+        <label class="field prompt-field">
+          <span>Draw one now</span>
+          <textarea id="imagePromptInput" rows="3" maxlength="5000" placeholder="Describe a picture to render immediately, without asking the assistant"></textarea>
+        </label>
+
+        <p class="form-error" id="imageFormError" role="alert"></p>
+
+        <div class="sheet-actions">
+          <button class="secondary-button" value="cancel" type="submit">Close</button>
+          <button class="primary-button" id="generateImageButton" type="button">Generate image</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog class="action-dialog" id="conversationActionsDialog">
+      <form method="dialog" class="action-panel">
+        <div class="sheet-header compact-header">
+          <h2>Conversation</h2>
+          <button class="icon-button" value="cancel" type="submit" aria-label="Close conversation actions">X</button>
+        </div>
+        <button class="menu-action" id="renameButton" type="button">Rename conversation</button>
+        <button class="menu-action" id="regenerateButton" type="button">Regenerate last answer</button>
+        <button class="menu-action" id="exportButton" type="button">Export conversation</button>
+        <button class="menu-action danger" id="clearButton" type="button">Clear conversation</button>
+      </form>
+    </dialog>
+
+    <script src="/app.js" defer></script>
+  </body>
+</html>

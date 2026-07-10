@@ -1,0 +1,27 @@
+{
+  "name": "local-ai-serving",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Managed local llama.cpp chat and optimized direct CUDA image interface.",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node scripts/start.js",
+    "serve": "node server.js",
+    "configure": "node scripts/configure.js",
+    "setup:image": "node scripts/fetch-image-assets.js",
+    "test": "node --test",
+    "test:privacy": "node scripts/check-publish.js",
+    "test:privacy:history": "node scripts/check-publish.js --fresh-history",
+    "test:models": "node scripts/validate-image-models.js",
+    "test:regression": "npm test && npm run test:models",
+    "test:regression:full": "npm run test:regression && npm run test:browser && npm run test:smoke",
+    "test:regression:all-models": "npm run test:regression && npm run test:browser && npm run test:smoke:all",
+    "test:browser": "node scripts/smoke-browser.js",
+    "test:browser:optional": "node scripts/smoke-browser.js --optional",
+    "test:smoke": "node scripts/smoke-hardware.js",
+    "test:smoke:all": "node scripts/smoke-hardware.js --all-text-models"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
