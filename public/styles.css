@@ -869,6 +869,7 @@ summary:focus-visible {
   place-items: center;
   width: calc(100% - 16px);
   min-height: 260px;
+  max-height: min(68dvh, 900px);
   margin: 8px;
   padding: 0;
   overflow: hidden;
@@ -879,6 +880,10 @@ summary:focus-visible {
   cursor: zoom-in;
 }
 
+.generated-image-pending {
+  cursor: default;
+}
+
 .generated-image-frame:focus-visible {
   outline: 3px solid var(--focus);
   outline-offset: 2px;
@@ -887,7 +892,7 @@ summary:focus-visible {
 .generated-image {
   display: block;
   width: 100%;
-  max-height: min(68dvh, 900px);
+  height: 100%;
   object-fit: contain;
 }
 

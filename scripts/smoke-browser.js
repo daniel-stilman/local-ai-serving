@@ -481,13 +481,19 @@ async function serveApi(apiPath, response, token, body, textLoadStates, chatProm
   if (apiPath === '/api/image/generate') {
     const payload = parseRequestJson(body);
     const model = IMAGE_MODELS.includes(payload.model) ? payload.model : IMAGE_MODELS[0];
+    const dimensions = {
+      portrait: { width: 832, height: 1216 },
+      square: { width: 1024, height: 1024 },
+      landscape: { width: 1216, height: 832 },
+    }[payload.size] || { width: 1024, height: 1024 };
+    await delay(1000);
     sendJson(response, 200, {
       imageBase64: SYNTHETIC_IMAGE_BASE64,
       mimeType: 'image/png',
       model,
       seed: 4242,
-      width: 1,
-      height: 1,
+      width: dimensions.width,
+      height: dimensions.height,
       steps: payload.steps,
       cfg: payload.cfg,
       sampler: payload.sampler,
@@ -818,7 +824,15 @@ function assertMixedMediaHistory(payloads, imageRequests, scenarioName, accessTo
 }
 
 function assertConversationLifecycle(exercise, scenarioName) {
-  assert.deepEqual(exercise.imageControls, {
+  assert.deepEqual({
+    generated: exercise.imageControls?.generated,
+    kind: exercise.imageControls?.kind,
+    model: exercise.imageControls?.model,
+    steps: exercise.imageControls?.steps,
+    cfg: exercise.imageControls?.cfg,
+    sampler: exercise.imageControls?.sampler,
+    negativePrompt: exercise.imageControls?.negativePrompt,
+  }, {
     generated: true,
     kind: 'sdxl',
     model: SDXL_IMAGE_MODELS[1],
@@ -826,8 +840,22 @@ function assertConversationLifecycle(exercise, scenarioName) {
     cfg: '123.45',
     sampler: 'dpmpp_sde_karras',
     negativePrompt: EXPECTED_AUTO_NEGATIVE,
-    scrollBefore: 0,
   }, `${scenarioName}: image controls did not survive the checkpoint switch`);
+  assert.ok(exercise.imageControls?.scrollDuring > 0,
+    `${scenarioName}: regression did not scroll the conversation during image generation`);
+  assert.equal(exercise.imageGallery?.anchorIdAfter, exercise.imageControls?.anchorIdDuring,
+    `${scenarioName}: image completion replaced the content the user parked in the viewport`);
+  assert.ok(Math.abs(exercise.imageGallery?.anchorOffsetAfter - exercise.imageControls?.anchorOffsetDuring) <= 1,
+    `${scenarioName}: image completion moved the parked viewport anchor (`
+      + `offset ${exercise.imageControls?.anchorOffsetDuring} to ${exercise.imageGallery?.anchorOffsetAfter}, `
+      + `scroll ${exercise.imageControls?.scrollDuring} to ${exercise.imageGallery?.scrollBefore}, `
+      + `extent ${exercise.imageControls?.scrollHeightDuring}h:${exercise.imageControls?.clientHeightDuring}v `
+      + `to ${exercise.imageGallery?.scrollHeightAfter}h:${exercise.imageGallery?.clientHeightAfter}v, `
+      + `frame ${exercise.imageControls?.frameHeightDuring} to ${exercise.imageGallery?.frameHeightAfter})`);
+  assert.ok(Math.abs(exercise.imageGallery?.scrollBefore - exercise.imageControls?.scrollDuring) <= 1,
+    `${scenarioName}: image completion overwrote the user's mid-generation scroll position`);
+  assert.ok(Math.abs(exercise.imageGallery?.frameHeightAfter - exercise.imageControls?.frameHeightDuring) <= 1,
+    `${scenarioName}: generated image completion changed its reserved layout height`);
   assert.equal(exercise.imageGallery?.itemCount, 2,
     `${scenarioName}: gallery did not include every image in the active conversation`);
   assert.equal(exercise.imageGallery?.galleryScrollable, true,
@@ -1646,7 +1674,6 @@ async function generateManualImageThroughUi(cdp, sessionId) {
         cfg: cfg.value,
         sampler: sampler.value,
         negativePrompt,
-        scrollBefore: document.getElementById('messages').scrollTop,
       };
       generate.click();
       return snapshot;
@@ -1655,7 +1682,34 @@ async function generateManualImageThroughUi(cdp, sessionId) {
   }, sessionId);
   assert.equal(generated.result?.value?.generated, true,
     'conversation fixture: Image studio could not submit a manual image prompt');
-  return generated.result?.value || {};
+  await waitForBrowserExpression(cdp, sessionId, `(() => {
+    const images = Array.from(document.querySelectorAll('.message.kind-image'));
+    const latest = images[images.length - 1];
+    return Boolean(latest?.querySelector('.generated-image-pending .streaming-indicator'));
+  })()`, 'The manual image did not remain visibly in progress long enough to test scrolling.');
+  const parked = await cdp.send('Runtime.evaluate', {
+    expression: `(() => {
+      const messages = document.getElementById('messages');
+      messages.dispatchEvent(new WheelEvent('wheel', { deltaY: 500, bubbles: true }));
+      messages.scrollTop = messages.scrollHeight;
+      const containerRect = messages.getBoundingClientRect();
+      const anchor = Array.from(messages.querySelectorAll('.message'))
+        .find(message => message.getBoundingClientRect().bottom > containerRect.top + 1);
+      const pending = Array.from(document.querySelectorAll('.message.kind-image .generated-image-pending')).at(-1);
+      return {
+        scrollDuring: messages.scrollTop,
+        anchorIdDuring: anchor?.dataset.messageId || '',
+        anchorOffsetDuring: anchor ? anchor.getBoundingClientRect().top - containerRect.top : 0,
+        frameHeightDuring: pending?.getBoundingClientRect().height || 0,
+        scrollHeightDuring: messages.scrollHeight,
+        clientHeightDuring: messages.clientHeight,
+      };
+    })()`,
+    returnByValue: true,
+  }, sessionId);
+  assert.ok(parked.result?.value?.scrollDuring > 0,
+    'conversation fixture: the conversation was not scrollable during image generation');
+  return { ...(generated.result?.value || {}), ...(parked.result?.value || {}) };
 }
 
 async function exerciseImageGalleryAndViewport(cdp, sessionId) {
@@ -1666,10 +1720,21 @@ async function exerciseImageGalleryAndViewport(cdp, sessionId) {
       const clickedImage = imageFrames[imageFrames.length - 1];
       if (!messages || !clickedImage) return { opened: false };
       const scrollBefore = messages.scrollTop;
+      const containerRect = messages.getBoundingClientRect();
+      const anchor = Array.from(messages.querySelectorAll('.message'))
+        .find(message => message.getBoundingClientRect().bottom > containerRect.top + 1);
+      const anchorIdAfter = anchor?.dataset.messageId || '';
+      const anchorOffsetAfter = anchor ? anchor.getBoundingClientRect().top - containerRect.top : 0;
+      const frameHeightAfter = clickedImage.getBoundingClientRect().height;
       clickedImage.click();
       return {
         opened: document.getElementById('imageGalleryDialog')?.open === true,
         scrollBefore,
+        anchorIdAfter,
+        anchorOffsetAfter,
+        frameHeightAfter,
+        scrollHeightAfter: messages.scrollHeight,
+        clientHeightAfter: messages.clientHeight,
       };
     })()`,
     returnByValue: true,
@@ -1678,10 +1743,12 @@ async function exerciseImageGalleryAndViewport(cdp, sessionId) {
     'conversation fixture: clicking a generated image did not open the gallery');
   await waitForBrowserExpression(cdp, sessionId, `(() => {
     const dialog = document.getElementById('imageGalleryDialog');
+    const viewport = document.getElementById('imageGalleryViewport');
     const items = Array.from(document.querySelectorAll('.gallery-item'));
     const images = Array.from(document.querySelectorAll('.gallery-image'));
     return dialog?.open && items.length === 2 && images.length === 2
-      && images.every(image => image.complete && image.naturalWidth > 0);
+      && images.every(image => image.complete && image.naturalWidth > 0)
+      && viewport?.scrollTop > 0;
   })()`, 'The conversation gallery did not hydrate both generated images.');
   const inspected = await cdp.send('Runtime.evaluate', {
     expression: `(() => {
@@ -1699,6 +1766,11 @@ async function exerciseImageGalleryAndViewport(cdp, sessionId) {
         galleryScroll,
         galleryScrollable,
         scrollBefore: ${JSON.stringify(opened.result?.value?.scrollBefore || 0)},
+        anchorIdAfter: ${JSON.stringify(opened.result?.value?.anchorIdAfter || '')},
+        anchorOffsetAfter: ${JSON.stringify(opened.result?.value?.anchorOffsetAfter || 0)},
+        frameHeightAfter: ${JSON.stringify(opened.result?.value?.frameHeightAfter || 0)},
+        scrollHeightAfter: ${JSON.stringify(opened.result?.value?.scrollHeightAfter || 0)},
+        clientHeightAfter: ${JSON.stringify(opened.result?.value?.clientHeightAfter || 0)},
         scrollAfter: messages.scrollTop,
       };
     })()`,

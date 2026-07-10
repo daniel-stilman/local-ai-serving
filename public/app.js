@@ -46,7 +46,13 @@ const AUTO_NEGATIVE_TERMS = 'bad, worst, awful, terrible, horrible, inferior, un
 const THINKING_MODE_VALUES = new Set(['auto', 'on', 'off']);
 const IMAGE_KIND_VALUES = new Set(['anima', 'sdxl']);
 const IMAGE_SIZE_VALUES = new Set(['portrait', 'square', 'landscape']);
+const IMAGE_DIMENSIONS = Object.freeze({
+  portrait: Object.freeze({ width: 832, height: 1216 }),
+  square: Object.freeze({ width: 1024, height: 1024 }),
+  landscape: Object.freeze({ width: 1216, height: 832 }),
+});
 const IMAGE_TOOL_NAME = 'generate_image';
+const VIEWPORT_SCROLL_KEYS = new Set(['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' ']);
 const MAX_TOOL_ROUNDS = 2;
 const MODEL_STATUS_POLL_MS = 200;
 const MODEL_READY_VISIBLE_MS = 900;
@@ -63,6 +69,8 @@ let imageGenerationInFlight = false;
 let modelLoadInFlight = false;
 let modelLoadPromise = null;
 let modelLoadSequence = 0;
+let messagesScrollIntentVersion = 0;
+let pendingMessagesViewportRestore = null;
 let streamingMessageId = null;
 let streamingFrame = null;
 const toolUnsupportedModels = new Set();
@@ -175,7 +183,16 @@ function wireEvents() {
   els.sidebarOverlay.addEventListener('click', closeSidebar);
   document.addEventListener('keydown', (event) => {
     if (event.key === 'Escape') closeSidebar();
+    const target = event.target;
+    const isEditing = target instanceof HTMLInputElement
+      || target instanceof HTMLTextAreaElement
+      || target instanceof HTMLSelectElement
+      || target?.isContentEditable;
+    if (!isEditing && VIEWPORT_SCROLL_KEYS.has(event.key)) markMessagesScrollIntent();
   });
+  for (const eventName of ['wheel', 'touchstart', 'touchmove', 'pointerdown']) {
+    els.messages.addEventListener(eventName, markMessagesScrollIntent, { passive: true });
+  }
 
   els.newChatButton.addEventListener('click', () => {
     if (isBusy()) return;
@@ -498,7 +515,7 @@ async function performManagedTextModelLoad(selectedModel, selectedBaseUrl, seque
     renderModelLoading({ state: 'ready', phase: 'ready' });
     setStatus('connected', 'Selected text model is ready');
     setTimeout(() => {
-      if (sequence === modelLoadSequence && !modelLoadInFlight) els.modelLoading.hidden = true;
+      if (sequence === modelLoadSequence && !modelLoadInFlight) setModelLoadingHidden(true);
     }, MODEL_READY_VISIBLE_MS);
     return true;
   } catch (error) {
@@ -533,11 +550,11 @@ function renderModelLoading(status) {
   const stateName = status?.state || 'idle';
   const phase = status?.phase || 'idle';
   if (stateName === 'idle' || stateName === 'disabled' || stateName === 'external') {
-    els.modelLoading.hidden = true;
+    setModelLoadingHidden(true);
     return;
   }
 
-  els.modelLoading.hidden = false;
+  setModelLoadingHidden(false);
   if (stateName === 'ready') {
     els.modelLoadingText.textContent = 'Ready';
     els.modelLoadingProgress.max = 1;
@@ -868,6 +885,7 @@ function renderActiveConversation(options = {}) {
     actions.append(chatButton, imageButton);
     empty.append(mark, heading, copy, actions);
     els.messages.append(empty);
+    retryPendingMessagesViewportRestore();
     return;
   }
 
@@ -877,6 +895,7 @@ function renderActiveConversation(options = {}) {
   }
   if (options.scrollToBottom) scrollMessagesToBottom();
   else if (options.preserveScroll) restoreMessagesViewport(viewportSnapshot);
+  retryPendingMessagesViewportRestore();
 }
 
 function isHiddenMessage(message) {
@@ -965,17 +984,25 @@ function getMessageDetail(message) {
 
 function renderGeneratedImage(body, message) {
   if (message.imageStatus === 'generating') {
+    const frame = document.createElement('div');
+    frame.className = 'generated-image-frame generated-image-pending';
+    applyGeneratedImageAspectRatio(frame, message);
     const waiting = document.createElement('div');
     waiting.className = 'streaming-indicator';
     waiting.textContent = 'Creating image...';
-    body.append(waiting);
+    frame.append(waiting);
+    body.append(frame);
     return;
   }
   if (message.imageStatus === 'error') {
+    const frame = document.createElement('div');
+    frame.className = 'generated-image-frame generated-image-pending';
+    applyGeneratedImageAspectRatio(frame, message);
     const error = document.createElement('div');
     error.className = 'image-error';
     error.textContent = message.error || 'Image generation failed.';
-    body.append(error);
+    frame.append(error);
+    body.append(frame);
     return;
   }
 
@@ -984,12 +1011,21 @@ function renderGeneratedImage(body, message) {
   frame.type = 'button';
   frame.setAttribute('aria-label', 'Open this image in the conversation gallery');
   frame.addEventListener('click', () => openImageGallery(message.id));
+  applyGeneratedImageAspectRatio(frame, message);
   const placeholder = document.createElement('div');
   placeholder.className = 'image-placeholder';
   placeholder.textContent = 'Loading image...';
   frame.append(placeholder);
   body.append(frame);
   if (message.imageId) hydrateGeneratedImage(frame, message);
+}
+
+function applyGeneratedImageAspectRatio(frame, message) {
+  const width = Number(message.width);
+  const height = Number(message.height);
+  frame.style.aspectRatio = Number.isFinite(width) && width > 0 && Number.isFinite(height) && height > 0
+    ? `${width} / ${height}`
+    : '1 / 1';
 }
 
 function renderMessageTools(message, parts) {
@@ -1673,6 +1709,7 @@ async function executeImageToolCall(conversation, call) {
   }
   const orientation = typeof args.orientation === 'string' ? args.orientation.toLowerCase() : '';
   const size = IMAGE_SIZE_VALUES.has(orientation) ? orientation : settings.size;
+  const dimensions = IMAGE_DIMENSIONS[size] || IMAGE_DIMENSIONS.square;
 
   const imageMessage = makeMessage('assistant', '', {
     kind: 'image',
@@ -1684,6 +1721,8 @@ async function executeImageToolCall(conversation, call) {
     cfg: settings.cfg,
     sampler: settings.sampler,
     loras: settings.loras,
+    width: dimensions.width,
+    height: dimensions.height,
     prompt,
     requestedBy: 'assistant',
   });
@@ -1819,6 +1858,7 @@ async function generateImage() {
   saveState();
 
   const conversation = getActiveConversation();
+  const dimensions = IMAGE_DIMENSIONS[state.image.size] || IMAGE_DIMENSIONS.square;
   const promptMessage = makeMessage('user', prompt, { kind: 'image-prompt' });
   const imageMessage = makeMessage('assistant', '', {
     kind: 'image',
@@ -1830,6 +1870,8 @@ async function generateImage() {
     cfg,
     sampler,
     loras,
+    width: dimensions.width,
+    height: dimensions.height,
     prompt,
   });
   conversation.messages.push(promptMessage, imageMessage);
@@ -1886,6 +1928,7 @@ async function hydrateGeneratedImage(frame, message) {
   const viewportSnapshot = captureMessagesViewport();
   frame.replaceChildren(image);
   restoreMessagesViewport(viewportSnapshot);
+  retryPendingMessagesViewportRestore();
 }
 
 async function getStoredImageBlob(message) {
@@ -2141,6 +2184,7 @@ function autosizePrompt() {
 }
 
 function scrollMessagesToBottom() {
+  markMessagesScrollIntent();
   requestAnimationFrame(() => { els.messages.scrollTop = els.messages.scrollHeight; });
 }
 
@@ -2156,21 +2200,72 @@ function captureMessagesViewport() {
 }
 
 function restoreMessagesViewport(snapshot) {
-  if (!snapshot) return;
+  if (!snapshot) return true;
+  const anchor = snapshot.anchorId
+    ? Array.from(els.messages.querySelectorAll('.message'))
+      .find((message) => message.dataset.messageId === snapshot.anchorId)
+    : null;
+  if (anchor) {
+    const containerTop = els.messages.getBoundingClientRect().top;
+    const currentOffset = anchor.getBoundingClientRect().top - containerTop;
+    els.messages.scrollTop += currentOffset - snapshot.anchorOffset;
+    const restoredOffset = anchor.getBoundingClientRect().top - containerTop;
+    return Math.abs(restoredOffset - snapshot.anchorOffset) <= 1;
+  }
+  const maxScrollTop = Math.max(0, els.messages.scrollHeight - els.messages.clientHeight);
+  els.messages.scrollTop = Math.min(snapshot.scrollTop, maxScrollTop);
+  return Math.abs(els.messages.scrollTop - snapshot.scrollTop) <= 1;
+}
+
+function setModelLoadingHidden(hidden) {
+  if (!els.modelLoading || els.modelLoading.hidden === hidden) return;
+  const viewportSnapshot = captureMessagesViewport();
+  els.modelLoading.hidden = hidden;
+  queueMessagesViewportRestore(viewportSnapshot);
+}
+
+function queueMessagesViewportRestore(snapshot) {
+  if (!pendingMessagesViewportRestore
+    || pendingMessagesViewportRestore.intentVersion !== messagesScrollIntentVersion
+    || pendingMessagesViewportRestore.conversationId !== state.activeConversationId) {
+    pendingMessagesViewportRestore = {
+      snapshot,
+      intentVersion: messagesScrollIntentVersion,
+      conversationId: state.activeConversationId,
+    };
+  }
+  retryPendingMessagesViewportRestore();
   requestAnimationFrame(() => {
-    const anchor = snapshot.anchorId
-      ? Array.from(els.messages.querySelectorAll('.message'))
-        .find((message) => message.dataset.messageId === snapshot.anchorId)
-      : null;
-    if (anchor) {
-      const containerTop = els.messages.getBoundingClientRect().top;
-      const currentOffset = anchor.getBoundingClientRect().top - containerTop;
-      els.messages.scrollTop += currentOffset - snapshot.anchorOffset;
-      return;
-    }
-    const maxScrollTop = Math.max(0, els.messages.scrollHeight - els.messages.clientHeight);
-    els.messages.scrollTop = Math.min(snapshot.scrollTop, maxScrollTop);
+    retryPendingMessagesViewportRestore();
+    requestAnimationFrame(() => {
+      retryPendingMessagesViewportRestore();
+    });
   });
+}
+
+function retryPendingMessagesViewportRestore() {
+  const pending = pendingMessagesViewportRestore;
+  if (!pending) return;
+  if (pending.intentVersion !== messagesScrollIntentVersion
+    || pending.conversationId !== state.activeConversationId) {
+    pendingMessagesViewportRestore = null;
+    return;
+  }
+  const anchorExists = !pending.snapshot.anchorId
+    || Array.from(els.messages.querySelectorAll('.message'))
+      .some((message) => message.dataset.messageId === pending.snapshot.anchorId);
+  if (!anchorExists) {
+    pendingMessagesViewportRestore = null;
+    return;
+  }
+  if (restoreMessagesViewport(pending.snapshot) && pendingMessagesViewportRestore === pending) {
+    pendingMessagesViewportRestore = null;
+  }
+}
+
+function markMessagesScrollIntent() {
+  messagesScrollIntentVersion += 1;
+  pendingMessagesViewportRestore = null;
 }
 
 function getActiveConversation() {
@@ -2422,7 +2517,7 @@ function setAccessRequired(required) {
   document.body.classList.toggle('access-is-required', accessIsRequired);
 
   if (accessIsRequired) {
-    if (els.modelLoading) els.modelLoading.hidden = true;
+    setModelLoadingHidden(true);
     imageConfig = {
       loaded: false,
       connected: false,

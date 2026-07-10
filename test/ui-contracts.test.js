@@ -233,6 +233,7 @@ test('missing and stale phone access never masquerade as empty text or image mod
     function updateModelSummary() {}
     function setBusy() {}
     function updateImageToolStatus() {}
+    function setModelLoadingHidden() {}
 
     ${sources}
 
@@ -399,6 +400,9 @@ test('browser harness contract covers persisted model choice, mixed multi-turn a
   assert.match(browserSmokeSource, /assertMixedMediaHistory/);
   assert.match(browserSmokeSource, /assertConversationLifecycle/);
   assert.match(browserSmokeSource, /generateManualImageThroughUi/);
+  assert.match(browserSmokeSource, /scrollDuring/);
+  assert.match(browserSmokeSource, /anchorIdDuring/);
+  assert.match(browserSmokeSource, /image completion overwrote the user's mid-generation scroll position/);
   assert.match(browserSmokeSource, /exerciseConversationIsolation/);
   assert.match(browserSmokeSource, /synthetic-phone\.invalid/);
   assert.match(browserSmokeSource, /host-resolver-rules/);
@@ -794,11 +798,35 @@ test('auto negative interleaves the positive prompt at a persisted selectable in
 test('image generation preserves the message viewport through rerenders and decoded image replacement', () => {
   const generateImage = extractFunctionSource(app, 'generateImage');
   const hydrateGeneratedImage = extractFunctionSource(app, 'hydrateGeneratedImage');
+  const restoreMessagesViewport = extractFunctionSource(app, 'restoreMessagesViewport');
+  const renderGeneratedImage = extractFunctionSource(app, 'renderGeneratedImage');
   assert.match(generateImage, /persistAndRender\(\{ messages: \{ preserveScroll: true \} \}\)/);
   assert.doesNotMatch(generateImage, /scrollToBottom/);
   assert.match(hydrateGeneratedImage, /await loadStoredImageElement/);
   assert.match(hydrateGeneratedImage, /captureMessagesViewport\(\)/);
   assert.match(hydrateGeneratedImage, /restoreMessagesViewport\(viewportSnapshot\)/);
+  assert.doesNotMatch(restoreMessagesViewport, /requestAnimationFrame/);
+  assert.match(restoreMessagesViewport, /anchorOffset/);
+  assert.match(renderGeneratedImage, /generated-image-pending/);
+  assert.match(renderGeneratedImage, /applyGeneratedImageAspectRatio/);
+  assert.match(app, /const IMAGE_DIMENSIONS = Object\.freeze/);
+  assert.match(extractFunctionSource(app, 'applyGeneratedImageAspectRatio'), /frame\.style\.aspectRatio/);
+  const setModelLoadingHidden = extractFunctionSource(app, 'setModelLoadingHidden');
+  assert.match(setModelLoadingHidden, /captureMessagesViewport\(\)/);
+  assert.match(setModelLoadingHidden, /queueMessagesViewportRestore\(viewportSnapshot\)/);
+  const queueMessagesViewportRestore = extractFunctionSource(app, 'queueMessagesViewportRestore');
+  const retryPendingMessagesViewportRestore = extractFunctionSource(app, 'retryPendingMessagesViewportRestore');
+  assert.match(queueMessagesViewportRestore, /intentVersion:\s*messagesScrollIntentVersion/);
+  assert.match(queueMessagesViewportRestore, /conversationId:\s*state\.activeConversationId/);
+  assert.match(queueMessagesViewportRestore, /requestAnimationFrame/);
+  assert.match(retryPendingMessagesViewportRestore, /restoreMessagesViewport\(pending\.snapshot\)/);
+  assert.match(retryPendingMessagesViewportRestore, /pending\.conversationId !== state\.activeConversationId/);
+  assert.match(extractFunctionSource(app, 'markMessagesScrollIntent'), /pendingMessagesViewportRestore = null/);
+  assert.match(extractFunctionSource(app, 'scrollMessagesToBottom'), /markMessagesScrollIntent\(\)/);
+  assert.match(app, /\['wheel', 'touchstart', 'touchmove', 'pointerdown'\]/);
+  assert.match(app, /VIEWPORT_SCROLL_KEYS/);
+  assert.match(app, /setTimeout\(\(\) => \{[\s\S]*setModelLoadingHidden\(true\)/);
+  assert.match(css, /\.generated-image-frame\s*\{[^}]*max-height:\s*min\(68dvh, 900px\)/s);
 });
 
 test('steps, CFG, and compatible LoRAs are first-class image controls', () => {
