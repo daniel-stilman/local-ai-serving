@@ -36,6 +36,7 @@ const CHAT_IMAGE_TOOL = Object.freeze({
   response: 'The synthetic tool image is ready.',
 });
 const MANUAL_IMAGE_PROMPT = 'A synthetic square made through Image studio.';
+const EXPECTED_AUTO_NEGATIVE = 'bad A synthetic bad square made bad through Image bad studio.';
 const CHAT_AFTER_IMAGE = Object.freeze({
   prompt: 'Continue the conversation after both images.',
   response: 'The conversation continued after both images.',
@@ -49,7 +50,9 @@ const RENAMED_CONVERSATION = 'Synthetic mixed conversation';
 const SYNTHETIC_TOOL_CALL_ID = 'synthetic-image-tool-call';
 const SYNTHETIC_IMAGE_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
 const SYNTHETIC_PHONE_HOST = 'synthetic-phone.invalid';
-const IMAGE_MODELS = ['synthetic-image-anima', 'synthetic-image-sdxl'];
+const ANIMA_IMAGE_MODELS = ['synthetic-image-anima', 'synthetic-image-anima-variant'];
+const SDXL_IMAGE_MODELS = ['synthetic-image-sdxl'];
+const IMAGE_MODELS = [...ANIMA_IMAGE_MODELS, ...SDXL_IMAGE_MODELS];
 const API_PATHS = new Set(['/api/config', '/api/models', '/api/image/config']);
 const FIXTURE_API_PATHS = new Set([...API_PATHS, '/api/chat', '/api/image/generate']);
 const TEXT_LOAD_API_PATHS = new Set(['/api/text/load', '/api/text/status']);
@@ -495,8 +498,11 @@ async function serveApi(apiPath, response, token, body, textLoadStates, chatProm
   sendJson(response, 200, {
     connected: true,
     models: {
-      anima: [syntheticImageModel(IMAGE_MODELS[0], 'Synthetic Anima')],
-      sdxl: [syntheticImageModel(IMAGE_MODELS[1], 'Synthetic SDXL')],
+      anima: [
+        syntheticImageModel(ANIMA_IMAGE_MODELS[0], 'Synthetic Anima'),
+        syntheticImageModel(ANIMA_IMAGE_MODELS[1], 'Synthetic Anima Variant'),
+      ],
+      sdxl: [syntheticImageModel(SDXL_IMAGE_MODELS[0], 'Synthetic SDXL')],
     },
     loras: { anima: [], sdxl: [] },
     runtime: {},
@@ -607,10 +613,10 @@ function assertScenario(page, scenario, requests) {
     assert.equal(page.textModelDisabled, false, `${scenario.name}: discovered text models are not selectable`);
     assert.equal(page.selectedTextModel, scenario.exerciseChat ? TEXT_MODELS[1] : TEXT_MODELS[0],
       `${scenario.name}: the expected discovered text model was not selected`);
-    assert.deepEqual(imageOptions, [IMAGE_MODELS[0]], `${scenario.name}: image models did not populate`);
+    assert.deepEqual(imageOptions, ANIMA_IMAGE_MODELS, `${scenario.name}: image models did not populate`);
     assert.deepEqual(page.imageOptionsByKind, {
-      anima: [IMAGE_MODELS[0]],
-      sdxl: [IMAGE_MODELS[1]],
+      anima: ANIMA_IMAGE_MODELS,
+      sdxl: SDXL_IMAGE_MODELS,
     }, `${scenario.name}: switching image families did not expose both model lists`);
     assert.deepEqual(new Set(apiRequests.map((entry) => entry.path)), API_PATHS,
       `${scenario.name}: frontend did not cover all model/config endpoints`);
@@ -785,11 +791,37 @@ function assertMixedMediaHistory(payloads, imageRequests, scenarioName, accessTo
     CHAT_IMAGE_TOOL.imagePrompt,
     MANUAL_IMAGE_PROMPT,
   ], `${scenarioName}: image-tool and Image-studio prompts reached the backend in the wrong order`);
+  assert.equal(imagePayloads[1].model, ANIMA_IMAGE_MODELS[1],
+    `${scenarioName}: manual image generation did not use the switched image model`);
+  assert.equal(imagePayloads[1].steps, 17,
+    `${scenarioName}: image model switching reset the chosen step count`);
+  assert.equal(imagePayloads[1].cfg, 3.25,
+    `${scenarioName}: image model switching reset the chosen CFG`);
+  assert.equal(imagePayloads[1].negativePrompt, EXPECTED_AUTO_NEGATIVE,
+    `${scenarioName}: automatic negative prompt did not reach image generation unchanged`);
   assert.ok(imageRequests.every((entry) => entry.token === accessToken),
     `${scenarioName}: an image-generation request omitted current access`);
 }
 
 function assertConversationLifecycle(exercise, scenarioName) {
+  assert.deepEqual(exercise.imageControls, {
+    generated: true,
+    model: ANIMA_IMAGE_MODELS[1],
+    steps: '17',
+    cfg: '3.25',
+    negativePrompt: EXPECTED_AUTO_NEGATIVE,
+    scrollBefore: 0,
+  }, `${scenarioName}: image controls did not survive the checkpoint switch`);
+  assert.equal(exercise.imageGallery?.itemCount, 2,
+    `${scenarioName}: gallery did not include every image in the active conversation`);
+  assert.equal(exercise.imageGallery?.galleryScrollable, true,
+    `${scenarioName}: gallery viewport did not allow scrolling through the conversation images`);
+  assert.ok(exercise.imageGallery?.initialGalleryScroll > 0,
+    `${scenarioName}: gallery did not open at the clicked conversation image`);
+  assert.ok(exercise.imageGallery?.galleryScroll < exercise.imageGallery?.initialGalleryScroll,
+    `${scenarioName}: gallery did not scroll from the clicked image back through the conversation`);
+  assert.ok(Math.abs(exercise.imageGallery?.scrollAfter - exercise.imageGallery?.scrollBefore) <= 1,
+    `${scenarioName}: image generation or gallery interaction moved the conversation viewport`);
   for (const key of ['mixedBeforeReload', 'mixedAfterReload']) {
     const snapshot = exercise?.[key] || {};
     assert.equal(snapshot.messageCount, 11,
@@ -809,6 +841,16 @@ function assertConversationLifecycle(exercise, scenarioName) {
     `${scenarioName}: mixed message types changed across reload`);
   assert.deepEqual(exercise.mixedAfterReload.contents, exercise.mixedBeforeReload.contents,
     `${scenarioName}: mixed message content changed across reload`);
+  assert.equal(exercise.mixedAfterReload.imageSettings?.modelByKind?.anima, ANIMA_IMAGE_MODELS[1],
+    `${scenarioName}: switched image model was not retained across reload`);
+  assert.equal(exercise.mixedAfterReload.imageSettings?.stepsByKind?.anima, '17',
+    `${scenarioName}: chosen image steps were not retained across reload`);
+  assert.equal(exercise.mixedAfterReload.imageSettings?.cfgByKind?.anima, '3.25',
+    `${scenarioName}: chosen image CFG was not retained across reload`);
+  assert.equal(exercise.mixedAfterReload.imageSettings?.autoNegativeEvery, 2,
+    `${scenarioName}: auto-negative interval was not retained across reload`);
+  assert.equal(exercise.mixedAfterReload.imageSettings?.negativePrompt, EXPECTED_AUTO_NEGATIVE,
+    `${scenarioName}: generated negative prompt was not retained across reload`);
   assert.equal(exercise.afterRegenerate?.messageCount, 13,
     `${scenarioName}: regeneration appended instead of replacing the last answer`);
   assert.ok(exercise.afterRegenerate?.contents.includes(CHAT_AFTER_IMAGE.regeneratedResponse),
@@ -1410,8 +1452,9 @@ async function exercisePersistedChatSelection(cdp, sessionId, scenario) {
   await submitConversationPrompt(cdp, sessionId, CHAT_IMAGE_TOOL.prompt, CHAT_IMAGE_TOOL.response);
   await waitForGeneratedImages(cdp, sessionId, 1, 'The assistant image tool did not render its generated image.');
 
-  await generateManualImageThroughUi(cdp, sessionId);
+  const imageControls = await generateManualImageThroughUi(cdp, sessionId);
   await waitForGeneratedImages(cdp, sessionId, 2, 'Image studio did not render its generated image.');
+  const imageGallery = await exerciseImageGalleryAndViewport(cdp, sessionId);
   const mixedBeforeReload = await readConversationSnapshot(cdp, sessionId);
 
   await reloadConversationPage(cdp, sessionId, scenario);
@@ -1481,6 +1524,8 @@ async function exercisePersistedChatSelection(cdp, sessionId, scenario) {
     selectionLoad,
     selectionReady,
     chatLoad,
+    imageControls,
+    imageGallery,
     mixedBeforeReload,
     mixedAfterReload,
     afterRegenerate,
@@ -1523,6 +1568,9 @@ async function submitConversationPrompt(cdp, sessionId, promptText, expectedResp
 }
 
 async function generateManualImageThroughUi(cdp, sessionId) {
+  await cdp.send('Runtime.evaluate', {
+    expression: `document.getElementById('messages').scrollTop = 0`,
+  }, sessionId);
   const opened = await cdp.send('Runtime.evaluate', {
     expression: `(() => {
       const open = document.getElementById('imageButton');
@@ -1543,16 +1591,92 @@ async function generateManualImageThroughUi(cdp, sessionId) {
     expression: `(() => {
       const prompt = document.getElementById('imagePromptInput');
       const generate = document.getElementById('generateImageButton');
-      if (!prompt || !generate || generate.disabled) return false;
+      const model = document.getElementById('imageModelSelect');
+      const steps = document.getElementById('imageStepsInput');
+      const cfg = document.getElementById('imageCfgInput');
+      const every = document.getElementById('autoNegativeEverySelect');
+      const auto = document.getElementById('autoNegativeButton');
+      if (!prompt || !generate || generate.disabled || !model || !steps || !cfg || !every || !auto) return { generated: false };
+      steps.value = '17';
+      steps.dispatchEvent(new Event('input', { bubbles: true }));
+      cfg.value = '3.25';
+      cfg.dispatchEvent(new Event('input', { bubbles: true }));
+      model.value = ${JSON.stringify(ANIMA_IMAGE_MODELS[1])};
+      model.dispatchEvent(new Event('change', { bubbles: true }));
       prompt.value = ${JSON.stringify(MANUAL_IMAGE_PROMPT)};
       prompt.dispatchEvent(new Event('input', { bubbles: true }));
+      every.value = '2';
+      every.dispatchEvent(new Event('change', { bubbles: true }));
+      const originalRandom = Math.random;
+      Math.random = () => 0;
+      auto.click();
+      Math.random = originalRandom;
+      const negativePrompt = document.getElementById('negativePromptInput').value;
+      const snapshot = {
+        generated: true,
+        model: model.value,
+        steps: steps.value,
+        cfg: cfg.value,
+        negativePrompt,
+        scrollBefore: document.getElementById('messages').scrollTop,
+      };
       generate.click();
-      return true;
+      return snapshot;
     })()`,
     returnByValue: true,
   }, sessionId);
-  assert.equal(generated.result?.value, true,
+  assert.equal(generated.result?.value?.generated, true,
     'conversation fixture: Image studio could not submit a manual image prompt');
+  return generated.result?.value || {};
+}
+
+async function exerciseImageGalleryAndViewport(cdp, sessionId) {
+  const opened = await cdp.send('Runtime.evaluate', {
+    expression: `(() => {
+      const messages = document.getElementById('messages');
+      const imageFrames = Array.from(document.querySelectorAll('.generated-image-frame'));
+      const clickedImage = imageFrames[imageFrames.length - 1];
+      if (!messages || !clickedImage) return { opened: false };
+      const scrollBefore = messages.scrollTop;
+      clickedImage.click();
+      return {
+        opened: document.getElementById('imageGalleryDialog')?.open === true,
+        scrollBefore,
+      };
+    })()`,
+    returnByValue: true,
+  }, sessionId);
+  assert.equal(opened.result?.value?.opened, true,
+    'conversation fixture: clicking a generated image did not open the gallery');
+  await waitForBrowserExpression(cdp, sessionId, `(() => {
+    const dialog = document.getElementById('imageGalleryDialog');
+    const items = Array.from(document.querySelectorAll('.gallery-item'));
+    const images = Array.from(document.querySelectorAll('.gallery-image'));
+    return dialog?.open && items.length === 2 && images.length === 2
+      && images.every(image => image.complete && image.naturalWidth > 0);
+  })()`, 'The conversation gallery did not hydrate both generated images.');
+  const inspected = await cdp.send('Runtime.evaluate', {
+    expression: `(() => {
+      const messages = document.getElementById('messages');
+      const viewport = document.getElementById('imageGalleryViewport');
+      const initialGalleryScroll = viewport.scrollTop;
+      viewport.scrollTop = 0;
+      const galleryScroll = viewport.scrollTop;
+      const itemCount = document.querySelectorAll('.gallery-item').length;
+      const galleryScrollable = viewport.scrollHeight > viewport.clientHeight;
+      document.getElementById('closeImageGalleryButton').click();
+      return {
+        itemCount,
+        initialGalleryScroll,
+        galleryScroll,
+        galleryScrollable,
+        scrollBefore: ${JSON.stringify(opened.result?.value?.scrollBefore || 0)},
+        scrollAfter: messages.scrollTop,
+      };
+    })()`,
+    returnByValue: true,
+  }, sessionId);
+  return inspected.result?.value || {};
 }
 
 async function waitForGeneratedImages(cdp, sessionId, expectedCount, timeoutMessage) {
@@ -1651,6 +1775,7 @@ async function readConversationSnapshot(cdp, sessionId) {
         generatedImageCount: document.querySelectorAll('.generated-image').length,
         promptValue: document.getElementById('promptInput')?.value || '',
         conversationCount: (saved.conversations || []).length,
+        imageSettings: saved.image || {},
       };
     })()`,
     returnByValue: true,

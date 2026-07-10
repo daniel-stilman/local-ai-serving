@@ -232,6 +232,23 @@
               <span>Negative prompt</span>
               <textarea id="negativePromptInput" rows="3" maxlength="3000" placeholder="Optional"></textarea>
             </label>
+            <div class="auto-negative-controls">
+              <label class="field compact-field">
+                <span>Insert every</span>
+                <select id="autoNegativeEverySelect" aria-label="Auto negative word interval">
+                  <option value="1">1 word</option>
+                  <option value="2">2 words</option>
+                  <option value="3">3 words</option>
+                  <option value="4" selected>4 words</option>
+                  <option value="5">5 words</option>
+                  <option value="6">6 words</option>
+                  <option value="8">8 words</option>
+                  <option value="10">10 words</option>
+                </select>
+              </label>
+              <button class="secondary-button" id="autoNegativeButton" type="button">Auto negative</button>
+            </div>
+            <p class="field-note">Mixes the positive prompt with randomly selected quality-negative terms at the chosen interval.</p>
             <label class="field">
               <span>Seed</span>
               <input id="imageSeedInput" type="number" min="0" step="1" placeholder="Random">
@@ -251,6 +268,22 @@
           <button class="primary-button" id="generateImageButton" type="button">Generate image</button>
         </div>
       </form>
+    </dialog>
+
+    <dialog class="gallery-dialog" id="imageGalleryDialog" aria-labelledby="imageGalleryHeading">
+      <div class="gallery-panel">
+        <div class="sheet-header gallery-header">
+          <div>
+            <p class="sheet-eyebrow">GALLERY</p>
+            <h2 id="imageGalleryHeading">Conversation images</h2>
+          </div>
+          <div class="gallery-header-actions">
+            <span id="imageGalleryCount" aria-live="polite"></span>
+            <button class="icon-button" id="closeImageGalleryButton" type="button" aria-label="Close image gallery">X</button>
+          </div>
+        </div>
+        <div class="gallery-viewport" id="imageGalleryViewport" tabindex="0" aria-label="Conversation image gallery"></div>
+      </div>
     </dialog>
 
     <dialog class="action-dialog" id="conversationActionsDialog">

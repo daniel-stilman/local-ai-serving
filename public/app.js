@@ -24,8 +24,12 @@ const DEFAULT_IMAGE_SETTINGS = {
   lorasByKind: { anima: [], sdxl: [] },
   size: 'portrait',
   negativePrompt: '',
+  autoNegativeEvery: 4,
   toolEnabled: true,
 };
+const AUTO_NEGATIVE_TERMS = 'bad, worst, awful, terrible, horrible, inferior, undesirable, ineffective, unconvincing, unexceptional, mediocre, disappointing, displeasing, uninspiring, forgettable, lackluster, subpar, inadequate, unenjoyable, shallow, stale, second-rate, disappointing, unimpressive, mundane, inept, low-quality, unenjoyable, pointless, boring, tedious, drab, dull, vapid, trivial, insignificant, negligible, paltry, unremarkable, unfulfilling, unsatisfying, unsolid, uninsightful, unrefreshing, ungratifying, unmasterful, uncompelling, unfavorable, poor, dreadful, abysmal, dismal, pathetic, pitiful, rubbish, shoddy, unsatisfactory, atrocious, miserable, lousy'
+  .split(',')
+  .map((term) => term.trim());
 const THINKING_MODE_VALUES = new Set(['auto', 'on', 'off']);
 const IMAGE_KIND_VALUES = new Set(['anima', 'sdxl']);
 const IMAGE_SIZE_VALUES = new Set(['portrait', 'square', 'landscape']);
@@ -110,6 +114,8 @@ const els = {
   imageModelSelect: document.getElementById('imageModelSelect'),
   imagePromptInput: document.getElementById('imagePromptInput'),
   negativePromptInput: document.getElementById('negativePromptInput'),
+  autoNegativeEverySelect: document.getElementById('autoNegativeEverySelect'),
+  autoNegativeButton: document.getElementById('autoNegativeButton'),
   imageSizeSelect: document.getElementById('imageSizeSelect'),
   imageStepsInput: document.getElementById('imageStepsInput'),
   imageCfgInput: document.getElementById('imageCfgInput'),
@@ -123,6 +129,10 @@ const els = {
   imageFormError: document.getElementById('imageFormError'),
   refreshImageModelsButton: document.getElementById('refreshImageModelsButton'),
   generateImageButton: document.getElementById('generateImageButton'),
+  imageGalleryDialog: document.getElementById('imageGalleryDialog'),
+  imageGalleryViewport: document.getElementById('imageGalleryViewport'),
+  imageGalleryCount: document.getElementById('imageGalleryCount'),
+  closeImageGalleryButton: document.getElementById('closeImageGalleryButton'),
   conversationActionsDialog: document.getElementById('conversationActionsDialog'),
 };
 
@@ -232,7 +242,7 @@ function wireEvents() {
   });
   els.imageModelSelect.addEventListener('change', () => {
     state.image.modelByKind[state.image.kind] = els.imageModelSelect.value;
-    applyImageRecommendation(true);
+    applyImageRecommendation(false);
     saveState();
   });
   els.imageSizeSelect.addEventListener('change', () => {
@@ -241,6 +251,15 @@ function wireEvents() {
   });
   els.imageStepsInput.addEventListener('input', saveImageParametersFromForm);
   els.imageCfgInput.addEventListener('input', saveImageParametersFromForm);
+  els.negativePromptInput.addEventListener('input', () => {
+    state.image.negativePrompt = els.negativePromptInput.value.slice(0, 3000);
+    saveState();
+  });
+  els.autoNegativeEverySelect.addEventListener('change', () => {
+    state.image.autoNegativeEvery = normalizeAutoNegativeEvery(els.autoNegativeEverySelect.value);
+    saveState();
+  });
+  els.autoNegativeButton.addEventListener('click', generateAutoNegativePrompt);
   els.imageToolToggle.addEventListener('change', () => {
     state.image.toolEnabled = els.imageToolToggle.checked;
     saveState();
@@ -249,6 +268,7 @@ function wireEvents() {
   els.addImageLoraButton.addEventListener('click', () => addImageLoraRow());
   els.refreshImageModelsButton.addEventListener('click', refreshImageConfig);
   els.generateImageButton.addEventListener('click', generateImage);
+  els.closeImageGalleryButton.addEventListener('click', () => els.imageGalleryDialog.close());
 }
 
 function updateComposerHint() {
@@ -798,7 +818,7 @@ function renderConversationList() {
 
 function renderActiveConversation(options = {}) {
   const conversation = getActiveConversation();
-  const previousScrollTop = els.messages.scrollTop;
+  const viewportSnapshot = captureMessagesViewport();
   els.conversationTitle.textContent = conversation.title;
   els.messages.replaceChildren();
 
@@ -835,7 +855,7 @@ function renderActiveConversation(options = {}) {
     els.messages.append(renderMessage(message));
   }
   if (options.scrollToBottom) scrollMessagesToBottom();
-  else if (options.preserveScroll) restoreMessagesScroll(previousScrollTop);
+  else if (options.preserveScroll) restoreMessagesViewport(viewportSnapshot);
 }
 
 function isHiddenMessage(message) {
@@ -936,8 +956,11 @@ function renderGeneratedImage(body, message) {
     return;
   }
 
-  const frame = document.createElement('div');
+  const frame = document.createElement('button');
   frame.className = 'generated-image-frame';
+  frame.type = 'button';
+  frame.setAttribute('aria-label', 'Open this image in the conversation gallery');
+  frame.addEventListener('click', () => openImageGallery(message.id));
   const placeholder = document.createElement('div');
   placeholder.className = 'image-placeholder';
   placeholder.textContent = 'Loading image...';
@@ -1254,6 +1277,7 @@ function applyImageSettingsToForm() {
   els.imageKindSelect.value = state.image.kind;
   els.imageSizeSelect.value = state.image.size;
   els.negativePromptInput.value = state.image.negativePrompt;
+  els.autoNegativeEverySelect.value = String(state.image.autoNegativeEvery);
   els.imageSeedInput.value = '';
   els.imageToolToggle.checked = state.image.toolEnabled !== false;
   applyImageKindSettings();
@@ -1272,6 +1296,52 @@ function saveImageParametersFromForm() {
   state.image.stepsByKind[kind] = els.imageStepsInput.value;
   state.image.cfgByKind[kind] = els.imageCfgInput.value;
   saveState();
+}
+
+function generateAutoNegativePrompt() {
+  const prompt = els.imagePromptInput.value.trim();
+  if (!prompt) {
+    els.imageFormError.textContent = 'Describe the positive prompt before creating an automatic negative prompt.';
+    els.imagePromptInput.focus();
+    return;
+  }
+  const every = normalizeAutoNegativeEvery(els.autoNegativeEverySelect.value);
+  const negativePrompt = interleaveAutoNegative(prompt, every).slice(0, 3000).trim();
+  els.negativePromptInput.value = negativePrompt;
+  state.image.negativePrompt = negativePrompt;
+  state.image.autoNegativeEvery = every;
+  els.imageFormError.textContent = '';
+  saveState();
+}
+
+function interleaveAutoNegative(prompt, every, random = Math.random) {
+  const words = String(prompt || '').trim().split(/\s+/).filter(Boolean);
+  if (!words.length) return '';
+  const interval = normalizeAutoNegativeEvery(every);
+  const firstBoundaryRange = Math.min(interval, words.length + 1);
+  const firstBoundary = Math.floor(clampRandom(random()) * firstBoundaryRange);
+  const output = [];
+  let nextBoundary = firstBoundary;
+  for (let boundary = 0; boundary <= words.length; boundary += 1) {
+    if (boundary === nextBoundary) {
+      const termIndex = Math.floor(clampRandom(random()) * AUTO_NEGATIVE_TERMS.length);
+      output.push(AUTO_NEGATIVE_TERMS[termIndex]);
+      nextBoundary += interval;
+    }
+    if (boundary < words.length) output.push(words[boundary]);
+  }
+  return output.join(' ');
+}
+
+function clampRandom(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) return 0;
+  return Math.min(number, 0.999999999999);
+}
+
+function normalizeAutoNegativeEvery(value) {
+  const number = Number.parseInt(value, 10);
+  return Number.isInteger(number) && number >= 1 && number <= 10 ? number : DEFAULT_IMAGE_SETTINGS.autoNegativeEvery;
 }
 
 function renderImageModelOptions() {
@@ -1701,7 +1771,7 @@ async function generateImage() {
   imageGenerationInFlight = true;
   els.imageDialog.close();
   setStatus('connected', 'Creating image');
-  persistAndRender({ messages: { scrollToBottom: true } });
+  persistAndRender({ messages: { preserveScroll: true } });
 
   try {
     const data = await requestImageGeneration({
@@ -1733,6 +1803,24 @@ async function generateImage() {
 }
 
 async function hydrateGeneratedImage(frame, message) {
+  const blob = await getStoredImageBlob(message);
+  if (!frame.isConnected) return;
+  if (!blob) {
+    renderMissingImage(frame);
+    return;
+  }
+  const image = await loadStoredImageElement(message, blob, 'generated-image');
+  if (!frame.isConnected) return;
+  if (!image) {
+    renderMissingImage(frame);
+    return;
+  }
+  const viewportSnapshot = captureMessagesViewport();
+  frame.replaceChildren(image);
+  restoreMessagesViewport(viewportSnapshot);
+}
+
+async function getStoredImageBlob(message) {
   let blob = sessionImageBlobs.get(message.imageId);
   if (!blob) {
     try {
@@ -1741,26 +1829,84 @@ async function hydrateGeneratedImage(frame, message) {
       blob = null;
     }
   }
-  if (!frame.isConnected) return;
-  if (!blob) {
-    const missing = document.createElement('div');
-    missing.className = 'image-placeholder';
-    missing.textContent = 'This image is no longer available.';
-    frame.replaceChildren(missing);
-    return;
-  }
+  return blob;
+}
 
+async function loadStoredImageElement(message, blob, className) {
   let url = imageObjectUrls.get(message.imageId);
   if (!url) {
     url = URL.createObjectURL(blob);
     imageObjectUrls.set(message.imageId, url);
   }
   const image = document.createElement('img');
-  image.className = 'generated-image';
-  image.src = url;
+  image.className = className;
   image.alt = message.prompt ? `Generated image: ${message.prompt}` : 'Generated image';
-  image.loading = 'lazy';
-  frame.replaceChildren(image);
+  image.decoding = 'async';
+  image.src = url;
+  try {
+    await image.decode();
+  } catch {
+    if (!image.complete || !image.naturalWidth) return null;
+  }
+  return image.naturalWidth ? image : null;
+}
+
+function renderMissingImage(container) {
+  const missing = document.createElement('div');
+  missing.className = 'image-placeholder';
+  missing.textContent = 'This image is no longer available.';
+  container.replaceChildren(missing);
+}
+
+function openImageGallery(messageId) {
+  const images = getActiveConversation().messages.filter((message) => (
+    message.kind === 'image' && message.imageStatus === 'ready' && message.imageId
+  ));
+  if (!images.length) return;
+  els.imageGalleryViewport.replaceChildren();
+  els.imageGalleryCount.textContent = `${images.length} image${images.length === 1 ? '' : 's'}`;
+  for (let index = 0; index < images.length; index += 1) {
+    const message = images[index];
+    const item = document.createElement('article');
+    item.className = 'gallery-item';
+    item.dataset.messageId = message.id;
+    const shell = document.createElement('div');
+    shell.className = 'gallery-image-shell';
+    const placeholder = document.createElement('div');
+    placeholder.className = 'image-placeholder';
+    placeholder.textContent = 'Loading image...';
+    shell.append(placeholder);
+    const caption = document.createElement('div');
+    caption.className = 'gallery-caption';
+    const position = document.createElement('strong');
+    position.textContent = `Image ${index + 1} of ${images.length}`;
+    const prompt = document.createElement('span');
+    prompt.textContent = message.prompt || 'Generated image';
+    caption.append(position, prompt);
+    item.append(shell, caption);
+    els.imageGalleryViewport.append(item);
+    void hydrateGalleryImage(shell, message);
+  }
+  els.imageGalleryDialog.showModal();
+  requestAnimationFrame(() => {
+    const target = Array.from(els.imageGalleryViewport.children)
+      .find((item) => item.dataset.messageId === messageId);
+    if (target) els.imageGalleryViewport.scrollTop = target.offsetTop - els.imageGalleryViewport.offsetTop;
+    els.imageGalleryViewport.focus({ preventScroll: true });
+  });
+}
+
+async function hydrateGalleryImage(shell, message) {
+  const blob = await getStoredImageBlob(message);
+  if (!shell.isConnected) return;
+  if (!blob) {
+    renderMissingImage(shell);
+    return;
+  }
+  const image = await loadStoredImageElement(message, blob, 'gallery-image');
+  if (!shell.isConnected) return;
+  if (image) shell.replaceChildren(image);
+  else renderMissingImage(shell);
 }
 
 function base64ToBlob(base64, mimeType) {
@@ -1930,10 +2076,32 @@ function scrollMessagesToBottom() {
   requestAnimationFrame(() => { els.messages.scrollTop = els.messages.scrollHeight; });
 }
 
-function restoreMessagesScroll(scrollTop) {
+function captureMessagesViewport() {
+  const containerRect = els.messages.getBoundingClientRect();
+  const anchor = Array.from(els.messages.querySelectorAll('.message'))
+    .find((message) => message.getBoundingClientRect().bottom > containerRect.top + 1);
+  return {
+    scrollTop: els.messages.scrollTop,
+    anchorId: anchor?.dataset.messageId || '',
+    anchorOffset: anchor ? anchor.getBoundingClientRect().top - containerRect.top : 0,
+  };
+}
+
+function restoreMessagesViewport(snapshot) {
+  if (!snapshot) return;
   requestAnimationFrame(() => {
+    const anchor = snapshot.anchorId
+      ? Array.from(els.messages.querySelectorAll('.message'))
+        .find((message) => message.dataset.messageId === snapshot.anchorId)
+      : null;
+    if (anchor) {
+      const containerTop = els.messages.getBoundingClientRect().top;
+      const currentOffset = anchor.getBoundingClientRect().top - containerTop;
+      els.messages.scrollTop += currentOffset - snapshot.anchorOffset;
+      return;
+    }
     const maxScrollTop = Math.max(0, els.messages.scrollHeight - els.messages.clientHeight);
-    els.messages.scrollTop = Math.min(scrollTop, maxScrollTop);
+    els.messages.scrollTop = Math.min(snapshot.scrollTop, maxScrollTop);
   });
 }
 
@@ -2059,6 +2227,7 @@ function normalizeImageSettings(settings = {}) {
     kind: normalizeImageKind(settings.kind),
     size: normalizeImageSize(settings.size),
     negativePrompt: typeof settings.negativePrompt === 'string' ? settings.negativePrompt.slice(0, 3000) : '',
+    autoNegativeEvery: normalizeAutoNegativeEvery(settings.autoNegativeEvery),
     toolEnabled: settings.toolEnabled !== false,
     modelByKind: {
       anima: typeof modelByKind.anima === 'string' ? modelByKind.anima : '',

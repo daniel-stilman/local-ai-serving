@@ -467,7 +467,9 @@ test('streaming response updates do not drag the message viewport', () => {
   assert.match(updateStreamingMessage, /requestAnimationFrame\(flushStreamingMessages\)/);
   assert.match(app, /node\.replaceChildren\(\.\.\.replacement\.childNodes\)/);
   assert.match(app, /function renderActiveConversation\(options = \{\}\)/);
-  assert.match(app, /restoreMessagesScroll\(previousScrollTop\)/);
+  assert.match(app, /captureMessagesViewport\(\)/);
+  assert.match(app, /restoreMessagesViewport\(viewportSnapshot\)/);
+  assert.match(app, /anchorOffset/);
   assert.match(app, /persistAndRender\(\{ messages: \{ preserveScroll: true \} \}\)/);
   assert.match(css, /\.messages\s*{[^}]*overflow-anchor:\s*none/s);
 });
@@ -751,6 +753,52 @@ test('image generation is model-selectable and keeps image blobs in browser stor
   assert.match(app, /createObjectURL\(blob\)/);
   assert.match(app, /deleteImageBlob\(message\.imageId\)/);
   assert.match(css, /\.generated-image-frame/);
+});
+
+test('image model switches preserve user tuning and gallery images are conversation-scoped', () => {
+  assert.doesNotMatch(app, /imageModelSelect\.addEventListener\('change',[\s\S]{0,220}applyImageRecommendation\(true\)/);
+  assert.match(app, /imageModelSelect\.addEventListener\('change',[\s\S]{0,220}applyImageRecommendation\(false\)/);
+  assert.match(html, /id="imageGalleryDialog"/);
+  assert.match(html, /id="imageGalleryViewport"/);
+  assert.match(app, /function openImageGallery\(messageId\)/);
+  assert.match(app, /getActiveConversation\(\)\.messages\.filter/);
+  assert.match(app, /frame\.addEventListener\('click', \(\) => openImageGallery\(message\.id\)\)/);
+  assert.match(css, /\.gallery-viewport\s*{[^}]*overflow-y:\s*auto/s);
+  assert.match(css, /\.gallery-item\s*{[^}]*scroll-snap-align:\s*start/s);
+});
+
+test('auto negative interleaves the positive prompt at a persisted selectable interval', () => {
+  assert.match(html, /id="autoNegativeEverySelect"/);
+  assert.match(html, /id="autoNegativeButton"/);
+  assert.match(app, /autoNegativeEvery:\s*4/);
+  assert.match(app, /bad, worst, awful, terrible/);
+  assert.match(app, /atrocious, miserable, lousy/);
+  const sources = [
+    extractFunctionSource(app, 'interleaveAutoNegative'),
+    extractFunctionSource(app, 'clampRandom'),
+    extractFunctionSource(app, 'normalizeAutoNegativeEvery'),
+  ].join('\n');
+  const makeNegative = vm.runInNewContext(`(() => {
+    const DEFAULT_IMAGE_SETTINGS = { autoNegativeEvery: 4 };
+    const AUTO_NEGATIVE_TERMS = ['bad', 'boring', 'lousy'];
+    ${sources}
+    return interleaveAutoNegative;
+  })()`);
+  assert.equal(
+    makeNegative('a cool guy riding a bike', 2, () => 0),
+    'bad a cool bad guy riding bad a bike bad',
+  );
+  assert.equal(makeNegative('single', 10, () => 0.999), 'single lousy');
+});
+
+test('image generation preserves the message viewport through rerenders and decoded image replacement', () => {
+  const generateImage = extractFunctionSource(app, 'generateImage');
+  const hydrateGeneratedImage = extractFunctionSource(app, 'hydrateGeneratedImage');
+  assert.match(generateImage, /persistAndRender\(\{ messages: \{ preserveScroll: true \} \}\)/);
+  assert.doesNotMatch(generateImage, /scrollToBottom/);
+  assert.match(hydrateGeneratedImage, /await loadStoredImageElement/);
+  assert.match(hydrateGeneratedImage, /captureMessagesViewport\(\)/);
+  assert.match(hydrateGeneratedImage, /restoreMessagesViewport\(viewportSnapshot\)/);
 });
 
 test('steps, CFG, and compatible LoRAs are first-class image controls', () => {
